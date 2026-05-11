@@ -1,4 +1,4 @@
-import { IsString, IsOptional, IsIn } from 'class-validator';
+import { IsString, IsOptional } from 'class-validator';
 
 export class CreateImageDto {
   @IsString()
@@ -6,6 +6,5 @@ export class CreateImageDto {
 
   @IsOptional()
   @IsString()
-  @IsIn(['gpt-image-1', 'dall-e-3'])
   model?: string = 'gpt-image-1';
 }

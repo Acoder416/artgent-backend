@@ -12,15 +12,24 @@ import {
   ParseIntPipe,
 } from '@nestjs/common';
 import { ImagesService } from './images.service';
+import { AiService } from './ai.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CreateImageDto } from './dto/create-image.dto';
 
 @Controller('images')
-@UseGuards(JwtAuthGuard)
 export class ImagesController {
-  constructor(private readonly imagesService: ImagesService) {}
+  constructor(
+    private readonly imagesService: ImagesService,
+    private readonly aiService: AiService,
+  ) {}
+
+  @Get('models')
+  async models() {
+    return { models: await this.aiService.listImageModels() };
+  }
 
   @Post('generate')
+  @UseGuards(JwtAuthGuard)
   async generate(@Request() req, @Body(ValidationPipe) createImageDto: CreateImageDto) {
     return this.imagesService.generate(
       req.user.id,
@@ -30,6 +39,7 @@ export class ImagesController {
   }
 
   @Get()
+  @UseGuards(JwtAuthGuard)
   async findAll(
     @Request() req,
     @Query('page') page: number = 1,
@@ -39,6 +49,7 @@ export class ImagesController {
   }
 
   @Get(':id')
+  @UseGuards(JwtAuthGuard)
   async findOne(@Request() req, @Param('id', ParseIntPipe) id: number) {
     const image = await this.imagesService.findById(id);
     if (!image || image.userId !== req.user.id) {
@@ -48,8 +59,9 @@ export class ImagesController {
   }
 
   @Delete(':id')
+  @UseGuards(JwtAuthGuard)
   async remove(@Request() req, @Param('id', ParseIntPipe) id: number) {
     await this.imagesService.deleteImage(id, req.user.id);
-    return { message: '图片已删除' };
+    return { message: 'Image deleted' };
   }
 }

@@ -8,6 +8,33 @@ export interface GenerateImageResult {
   error?: string;
 }
 
+interface OpenAIImageResponse {
+  data?: Array<{
+    b64_json?: string;
+    url?: string;
+  }>;
+  error?: {
+    message?: string;
+  };
+}
+
+interface OpenAIModelsResponse {
+  data?: Array<{
+    id?: string;
+  }>;
+}
+
+const fallbackImageModels = [
+  'gpt-image-1',
+  'gpt-image-1-mini',
+  'gpt-image-1.5',
+  'gpt-image-2',
+  'gemini-2.0-flash-exp-image-generation',
+  'gemini-2.5-flash-image',
+  'gemini-3-pro-image-preview',
+  'gemini-3.1-flash-image',
+];
+
 @Injectable()
 export class AiService {
   private readonly logger = new Logger(AiService.name);
@@ -19,15 +46,31 @@ export class AiService {
     this.apiKey = this.configService.get('SUB2API_KEY', '');
   }
 
-  /**
-   * 调用AI接口生成图片
-   * TODO: 接入实际的图片生成API（sub2api 或 OpenAI）
-   * 
-   * @param prompt 用户输入的提示词
-   * @param model 模型名称 (gpt-image-1 / dall-e-3)
-   * @param size 图片尺寸
-   * @returns 图片Buffer
-   */
+  async listImageModels(): Promise<string[]> {
+    if (!this.apiKey) {
+      return fallbackImageModels;
+    }
+
+    try {
+      const response = await axios.get<OpenAIModelsResponse>(`${this.baseUrl}/v1/models`, {
+        headers: {
+          Authorization: `Bearer ${this.apiKey}`,
+        },
+        timeout: 30000,
+      });
+
+      const models = (response.data?.data || [])
+        .map((model) => model.id)
+        .filter((id): id is string => Boolean(id))
+        .filter((id) => fallbackImageModels.includes(id) || id.includes('image'));
+
+      return models.length > 0 ? models : fallbackImageModels;
+    } catch (error) {
+      this.logger.warn(`Failed to fetch image models: ${error.message}`);
+      return fallbackImageModels;
+    }
+  }
+
   async generateImage(
     prompt: string,
     model: string = 'gpt-image-1',
@@ -36,41 +79,60 @@ export class AiService {
     this.logger.log(`Generating image: model=${model}, prompt="${prompt.slice(0, 50)}..."`);
 
     try {
-      // TODO: 替换为实际的图片生成API调用
-      // 示例：OpenAI Images API
-      // const response = await axios.post(
-      //   `${this.baseUrl}/v1/images/generations`,
-      //   {
-      //     model,
-      //     prompt,
-      //     n: 1,
-      //     size,
-      //     response_format: 'b64_json',
-      //   },
-      //   {
-      //     headers: {
-      //       'Authorization': `Bearer ${this.apiKey}`,
-      //       'Content-Type': 'application/json',
-      //     },
-      //     timeout: 120000, // 2分钟超时
-      //   },
-      // );
-      // const imageBase64 = response.data.data[0].b64_json;
-      // return {
-      //   success: true,
-      //   imageBuffer: Buffer.from(imageBase64, 'base64'),
-      // };
+      if (!this.apiKey) {
+        return {
+          success: false,
+          error: 'Sub2API key is not configured',
+        };
+      }
 
-      // 临时：返回错误提示，等待接入实际API
+      const response = await axios.post<OpenAIImageResponse>(
+        `${this.baseUrl}/v1/images/generations`,
+        {
+          model,
+          prompt,
+          n: 1,
+          size,
+          response_format: 'b64_json',
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${this.apiKey}`,
+            'Content-Type': 'application/json',
+          },
+          timeout: 120000,
+        },
+      );
+
+      const image = response.data?.data?.[0];
+      if (image?.b64_json) {
+        return {
+          success: true,
+          imageBuffer: Buffer.from(image.b64_json, 'base64'),
+        };
+      }
+
+      if (image?.url) {
+        const imageResponse = await axios.get<ArrayBuffer>(image.url, {
+          responseType: 'arraybuffer',
+          timeout: 120000,
+        });
+
+        return {
+          success: true,
+          imageBuffer: Buffer.from(imageResponse.data),
+        };
+      }
+
       return {
         success: false,
-        error: '图片生成API尚未接入，请联系管理员配置',
+        error: response.data?.error?.message || 'Image generation API returned no image',
       };
     } catch (error) {
       this.logger.error(`Image generation failed: ${error.message}`);
       return {
         success: false,
-        error: error.response?.data?.error?.message || error.message || '图片生成失败',
+        error: error.response?.data?.error?.message || error.message || 'Image generation failed',
       };
     }
   }

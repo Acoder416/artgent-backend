@@ -56,9 +56,14 @@ async function bootstrap() {
   // 再启动 NestJS（此时数据库已存在，TypeORM 可正常连接建表）
   const app = await NestFactory.create(AppModule);
   const configService = app.get(ConfigService);
+  const allowedOrigins = configService
+    .get('FRONTEND_URL', 'http://localhost:3000,http://localhost:3002')
+    .split(',')
+    .map((origin: string) => origin.trim())
+    .filter(Boolean);
 
   app.enableCors({
-    origin: configService.get('FRONTEND_URL', 'http://localhost:3002'),
+    origin: allowedOrigins,
     credentials: true,
   });
 
