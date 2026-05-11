@@ -23,7 +23,7 @@ const envFile = `.env.${process.env.NODE_ENV || 'development'}`;
         password: configService.get('DB_PASSWORD', 'ArtGen@2026'),
         database: configService.get('DB_DATABASE', 'artgen'),
         entities: [__dirname + '/**/*.entity{.ts,.js}'],
-        synchronize: false,
+        synchronize: configService.get('NODE_ENV') !== 'production',
         charset: 'utf8mb4',
       }),
       inject: [ConfigService],
