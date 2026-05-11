@@ -1,0 +1,23 @@
+# dependencies
+/node_modules
+
+# build
+/dist
+
+# logs
+/logs
+
+# environment files — ALL ignored
+.env
+.env.*
+.env.bak
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
