@@ -10,11 +10,15 @@ import {
   ValidationPipe,
   Param,
   ParseIntPipe,
+  UploadedFile,
+  UseInterceptors,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import { ImagesService } from './images.service';
 import { AiService } from './ai.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CreateImageDto } from './dto/create-image.dto';
+import type { UploadedImageFile } from './types/uploaded-image-file';
 
 @Controller('images')
 export class ImagesController {
@@ -30,11 +34,18 @@ export class ImagesController {
 
   @Post('generate')
   @UseGuards(JwtAuthGuard)
-  async generate(@Request() req, @Body(ValidationPipe) createImageDto: CreateImageDto) {
+  @UseInterceptors(FileInterceptor('image', { limits: { fileSize: 20 * 1024 * 1024 } }))
+  async generate(
+    @Request() req,
+    @Body(ValidationPipe) createImageDto: CreateImageDto,
+    @UploadedFile() image?: UploadedImageFile,
+  ) {
     return this.imagesService.generate(
       req.user.id,
       createImageDto.prompt,
       createImageDto.model,
+      createImageDto.size,
+      image ? { file: image } : { url: createImageDto.referenceImageUrl },
     );
   }
 

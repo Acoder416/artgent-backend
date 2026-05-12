@@ -5,6 +5,7 @@ import { Image } from './image.entity';
 import { UsersService } from '../users/users.service';
 import { AiService } from './ai.service';
 import { MinioService } from '../upload/minio.service';
+import { ReferenceImage } from './types/uploaded-image-file';
 
 @Injectable()
 export class ImagesService {
@@ -26,7 +27,13 @@ export class ImagesService {
    * 4. 上传到 MinIO
    * 5. 扣积分、更新状态
    */
-  async generate(userId: number, prompt: string, model: string = 'gpt-image-1'): Promise<Image> {
+  async generate(
+    userId: number,
+    prompt: string,
+    model: string = 'gpt-image-2',
+    size: string = '1024x1024',
+    referenceImage?: ReferenceImage,
+  ): Promise<Image> {
     // 1. 检查用户
     const user = await this.usersService.findById(userId);
     if (!user) {
@@ -41,12 +48,13 @@ export class ImagesService {
       userId,
       prompt,
       model,
+      ...this.parseImageSize(size),
       status: 'generating',
     });
     const saved = await this.imagesRepository.save(image);
 
     // 3. 异步执行生成流程（不阻塞返回）
-    this.processGeneration(saved.id, userId, prompt, model).catch((err) => {
+    this.processGeneration(saved.id, userId, prompt, model, size, referenceImage).catch((err) => {
       this.logger.error(`Generation failed for image ${saved.id}: ${err.message}`);
     });
 
@@ -61,10 +69,12 @@ export class ImagesService {
     userId: number,
     prompt: string,
     model: string,
+    size: string,
+    referenceImage?: ReferenceImage,
   ): Promise<void> {
     try {
       // 调用 AI 生成
-      const result = await this.aiService.generateImage(prompt, model);
+      const result = await this.aiService.generateImage(prompt, model, size, referenceImage);
 
       if (!result.success || !result.imageBuffer) {
         await this.updateStatus(imageId, 'failed', undefined, undefined, result.error || '生成失败');
@@ -138,5 +148,17 @@ export class ImagesService {
     }
 
     await this.imagesRepository.remove(image);
+  }
+
+  private parseImageSize(size: string): { width: number; height: number } {
+    const match = size.match(/^(\d+)x(\d+)$/);
+    if (!match) {
+      return { width: 1024, height: 1024 };
+    }
+
+    return {
+      width: Number(match[1]),
+      height: Number(match[2]),
+    };
   }
 }

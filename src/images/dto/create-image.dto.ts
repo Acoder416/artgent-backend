@@ -6,5 +6,13 @@ export class CreateImageDto {
 
   @IsOptional()
   @IsString()
-  model?: string = 'gpt-image-1';
+  model?: string = 'gpt-image-2';
+
+  @IsOptional()
+  @IsString()
+  size?: string = '1024x1024';
+
+  @IsOptional()
+  @IsString()
+  referenceImageUrl?: string;
 }
