@@ -22,10 +22,11 @@ export class ImagesService {
   /**
    * 生成图片（完整流程）
    * 1. 检查用户积分
-   * 2. 创建 pending 记录
-   * 3. 调用 AI 生成图片
-   * 4. 上传到 MinIO
-   * 5. 扣积分、更新状态
+   * 2. 预扣积分
+   * 3. 创建 pending 记录
+   * 4. 调用 AI 生成图片
+   * 5. 上传到 MinIO
+   * 6. 更新状态（失败则退还积分）
    */
   async generate(
     userId: number,
@@ -43,7 +44,10 @@ export class ImagesService {
       throw new BadRequestException('积分不足，请充值');
     }
 
-    // 2. 创建记录
+    // 2. 预扣积分
+    await this.usersService.deductCredits(userId, 1);
+
+    // 3. 创建记录
     const image = this.imagesRepository.create({
       userId,
       prompt,
@@ -53,7 +57,7 @@ export class ImagesService {
     });
     const saved = await this.imagesRepository.save(image);
 
-    // 3. 异步执行生成流程（不阻塞返回）
+    // 4. 异步执行生成流程（不阻塞返回）
     this.processGeneration(saved.id, userId, prompt, model, size, referenceImage).catch((err) => {
       this.logger.error(`Generation failed for image ${saved.id}: ${err.message}`);
     });
@@ -77,7 +81,10 @@ export class ImagesService {
       const result = await this.aiService.generateImage(prompt, model, size, referenceImage);
 
       if (!result.success || !result.imageBuffer) {
+        // 生成失败，退还积分
+        await this.usersService.addCredits(userId, 1);
         await this.updateStatus(imageId, 'failed', undefined, undefined, result.error || '生成失败');
+        this.logger.log(`Image ${imageId} generation failed, credits refunded`);
         return;
       }
 
@@ -87,11 +94,10 @@ export class ImagesService {
       // 更新状态
       await this.updateStatus(imageId, 'completed', imageUrl);
 
-      // 扣积分
-      await this.usersService.deductCredits(userId, 1);
-
       this.logger.log(`Image ${imageId} generated successfully`);
     } catch (error) {
+      // 异常情况，退还积分
+      await this.usersService.addCredits(userId, 1);
       this.logger.error(`Process generation failed: ${error.message}`);
       await this.updateStatus(imageId, 'failed', undefined, undefined, error.message);
     }

@@ -65,10 +65,27 @@ export class UsersService {
     if (!user) {
       throw new NotFoundException('用户不存在');
     }
+    // admin用户不扣积分
+    if (user.username === 'admin') {
+      return user;
+    }
     if (user.credits < amount) {
       throw new ConflictException('积分不足');
     }
     user.credits -= amount;
+    return this.usersRepository.save(user);
+  }
+
+  async addCredits(userId: number, amount: number = 1): Promise<User> {
+    const user = await this.findById(userId);
+    if (!user) {
+      throw new NotFoundException('用户不存在');
+    }
+    // admin用户不加积分（已经是无限）
+    if (user.username === 'admin') {
+      return user;
+    }
+    user.credits += amount;
     return this.usersRepository.save(user);
   }
 
@@ -79,5 +96,20 @@ export class UsersService {
     }
     const { passwordHash, ...profile } = user;
     return profile;
+  }
+
+  // 刷新非管理员用户的积分（每天调用）
+  async refreshCreditsForNonAdminUsers(): Promise<void> {
+    const defaultCredits = 10;
+    
+    // 更新所有非管理员用户的积分为10
+    await this.usersRepository
+      .createQueryBuilder()
+      .update(User)
+      .set({ credits: defaultCredits })
+      .where('username != :username', { username: 'admin' })
+      .execute();
+    
+    console.log(`[积分刷新] 已将非管理员用户积分刷新为 ${defaultCredits}`);
   }
 }
