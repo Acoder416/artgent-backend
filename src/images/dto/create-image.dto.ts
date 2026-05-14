@@ -15,4 +15,8 @@ export class CreateImageDto {
   @IsOptional()
   @IsString()
   referenceImageUrl?: string;
+
+  @IsOptional()
+  @IsString()
+  sourceImageUrl?: string;
 }

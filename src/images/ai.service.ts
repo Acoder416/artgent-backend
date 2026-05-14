@@ -80,9 +80,15 @@ export class AiService {
     size: string = '1024x1024',
     referenceImage?: ReferenceImage,
   ): Promise<GenerateImageResult> {
+    const referenceCount =
+      (referenceImage?.files?.length || 0) +
+      (referenceImage?.urls?.length || 0) +
+      (referenceImage?.file ? 1 : 0) +
+      (referenceImage?.url ? 1 : 0);
+
     this.logger.log(
       `Generating image: model=${model}, size=${size}, mode=${
-        referenceImage?.file || referenceImage?.url ? 'edit' : 'generation'
+        referenceCount > 0 ? 'edit' : 'generation'
       }, prompt="${prompt.slice(0, 50)}..."`,
     );
 
@@ -94,8 +100,8 @@ export class AiService {
         };
       }
 
-      const response = referenceImage?.file || referenceImage?.url
-        ? await this.editImage(prompt, model, size, referenceImage)
+      const response = referenceCount > 0
+        ? await this.editImage(prompt, model, size, referenceImage || {})
         : await this.createImage(prompt, model, size);
 
       return this.extractImageBuffer(response.data);
@@ -149,8 +155,16 @@ export class AiService {
       Authorization: `Bearer ${this.apiKey}`,
       'Content-Type': 'application/json',
     };
+    const files = [
+      ...(referenceImage.files || []),
+      ...(referenceImage.file ? [referenceImage.file] : []),
+    ];
+    const urls = [
+      ...(referenceImage.urls || []),
+      ...(referenceImage.url ? [referenceImage.url] : []),
+    ].filter(Boolean);
 
-    if (referenceImage.file) {
+    if (files.length > 0 && urls.length === 0) {
       const formData = new FormData();
       formData.append('model', model);
       formData.append('prompt', prompt);
@@ -158,26 +172,23 @@ export class AiService {
       formData.append('size', size);
       formData.append('response_format', 'b64_json');
 
-      const imageBuffer = referenceImage.file.buffer;
-      const imageArrayBuffer = imageBuffer.buffer.slice(
-        imageBuffer.byteOffset,
-        imageBuffer.byteOffset + imageBuffer.byteLength,
-      ) as ArrayBuffer;
-
-      formData.append(
-        'image',
-        new Blob([imageArrayBuffer], {
-          type: referenceImage.file.mimetype || 'application/octet-stream',
-        }),
-        referenceImage.file.originalname || 'reference.png',
-      );
+      files.forEach((file, index) => {
+        formData.append(
+          'image',
+          this.fileToBlob(file),
+          file.originalname || `reference-${index + 1}.png`,
+        );
+      });
 
       data = formData;
       headers = {
         Authorization: `Bearer ${this.apiKey}`,
       };
     } else {
-      body.images = [{ image_url: referenceImage.url }];
+      body.images = [
+        ...urls.map((url) => ({ image_url: url })),
+        ...files.map((file) => ({ image_url: this.fileToDataUrl(file) })),
+      ];
     }
 
     return axios.post<OpenAIImageResponse>(
@@ -188,6 +199,23 @@ export class AiService {
         timeout: 1200000,
       },
     );
+  }
+
+  private fileToBlob(file: UploadedImageFile): Blob {
+    const imageBuffer = file.buffer;
+    const imageArrayBuffer = imageBuffer.buffer.slice(
+      imageBuffer.byteOffset,
+      imageBuffer.byteOffset + imageBuffer.byteLength,
+    ) as ArrayBuffer;
+
+    return new Blob([imageArrayBuffer], {
+      type: file.mimetype || 'application/octet-stream',
+    });
+  }
+
+  private fileToDataUrl(file: UploadedImageFile): string {
+    const mimeType = file.mimetype || 'application/octet-stream';
+    return `data:${mimeType};base64,${file.buffer.toString('base64')}`;
   }
 
   private async extractImageBuffer(

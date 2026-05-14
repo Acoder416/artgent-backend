@@ -10,10 +10,10 @@ import {
   ValidationPipe,
   Param,
   ParseIntPipe,
-  UploadedFile,
+  UploadedFiles,
   UseInterceptors,
 } from '@nestjs/common';
-import { FileInterceptor } from '@nestjs/platform-express';
+import { FilesInterceptor } from '@nestjs/platform-express';
 import { ImagesService } from './images.service';
 import { AiService } from './ai.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -34,18 +34,26 @@ export class ImagesController {
 
   @Post('generate')
   @UseGuards(JwtAuthGuard)
-  @UseInterceptors(FileInterceptor('image', { limits: { fileSize: 20 * 1024 * 1024 } }))
+  @UseInterceptors(FilesInterceptor('image', 5, { limits: { fileSize: 20 * 1024 * 1024 } }))
   async generate(
     @Request() req,
     @Body(ValidationPipe) createImageDto: CreateImageDto,
-    @UploadedFile() image?: UploadedImageFile,
+    @UploadedFiles() images?: UploadedImageFile[],
   ) {
+    const urls = [
+      createImageDto.sourceImageUrl,
+      createImageDto.referenceImageUrl,
+    ].filter((url): url is string => Boolean(url));
+
     return this.imagesService.generate(
       req.user.id,
       createImageDto.prompt,
       createImageDto.model,
       createImageDto.size,
-      image ? { file: image } : { url: createImageDto.referenceImageUrl },
+      {
+        files: images || [],
+        urls,
+      },
     );
   }
 
