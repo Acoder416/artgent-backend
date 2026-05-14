@@ -28,6 +28,9 @@ export class User {
   @Column({ default: 10 })
   credits: number;
 
+  @Column({ length: 20, default: 'user' })
+  role: string;
+
   @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
 

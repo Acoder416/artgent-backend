@@ -15,6 +15,11 @@ export class UsersService {
   async create(createUserDto: CreateUserDto): Promise<User> {
     const { username, email, password } = createUserDto;
 
+    // 禁止注册admin用户名
+    if (username.toLowerCase() === 'admin') {
+      throw new ConflictException('用户名已存在');
+    }
+
     // 检查用户名是否已存在
     const existingUsername = await this.usersRepository.findOne({
       where: { username },
@@ -39,6 +44,7 @@ export class UsersService {
       username,
       email,
       passwordHash,
+      role: 'user',
     });
 
     return this.usersRepository.save(user);
@@ -66,7 +72,7 @@ export class UsersService {
       throw new NotFoundException('用户不存在');
     }
     // admin用户不扣积分
-    if (user.username === 'admin') {
+    if (user.role === 'admin') {
       return user;
     }
     if (user.credits < amount) {
@@ -82,7 +88,7 @@ export class UsersService {
       throw new NotFoundException('用户不存在');
     }
     // admin用户不加积分（已经是无限）
-    if (user.username === 'admin') {
+    if (user.role === 'admin') {
       return user;
     }
     user.credits += amount;
@@ -107,7 +113,7 @@ export class UsersService {
       .createQueryBuilder()
       .update(User)
       .set({ credits: defaultCredits })
-      .where('username != :username', { username: 'admin' })
+      .where('role != :role', { role: 'admin' })
       .execute();
     
     console.log(`[积分刷新] 已将非管理员用户积分刷新为 ${defaultCredits}`);
