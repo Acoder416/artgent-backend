@@ -1,9 +1,19 @@
-import { Injectable, ConflictException, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  ConflictException,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import * as bcrypt from 'bcryptjs';
 import { User } from './user.entity';
 import { CreateUserDto } from './dto/create-user.dto';
+
+interface AdminUserConfig {
+  username: string;
+  email: string;
+  password: string;
+}
 
 @Injectable()
 export class UsersService {
@@ -11,6 +21,24 @@ export class UsersService {
     @InjectRepository(User)
     private usersRepository: Repository<User>,
   ) {}
+
+  async ensureAdminUser(config: AdminUserConfig): Promise<User> {
+    const existingUser = await this.findByUsername(config.username);
+    if (existingUser) {
+      existingUser.role = 'admin';
+      return this.usersRepository.save(existingUser);
+    }
+
+    const passwordHash = await bcrypt.hash(config.password, 10);
+    const administrator = this.usersRepository.create({
+      username: config.username,
+      email: config.email,
+      passwordHash,
+      role: 'admin',
+    });
+
+    return this.usersRepository.save(administrator);
+  }
 
   async create(createUserDto: CreateUserDto): Promise<User> {
     const { username, email, password } = createUserDto;
@@ -101,13 +129,14 @@ export class UsersService {
       throw new NotFoundException('用户不存在');
     }
     const { passwordHash, ...profile } = user;
+    void passwordHash;
     return profile;
   }
 
   // 刷新非管理员用户的积分（每天调用）
   async refreshCreditsForNonAdminUsers(): Promise<void> {
     const defaultCredits = 10;
-    
+
     // 更新所有非管理员用户的积分为10
     await this.usersRepository
       .createQueryBuilder()
@@ -115,7 +144,7 @@ export class UsersService {
       .set({ credits: defaultCredits })
       .where('role != :role', { role: 'admin' })
       .execute();
-    
+
     console.log(`[积分刷新] 已将非管理员用户积分刷新为 ${defaultCredits}`);
   }
 }

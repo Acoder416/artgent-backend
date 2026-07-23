@@ -1,4 +1,9 @@
-import { Injectable, Logger, NotFoundException, BadRequestException } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  NotFoundException,
+  BadRequestException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Image } from './image.entity';
@@ -40,7 +45,7 @@ export class ImagesService {
     if (!user) {
       throw new NotFoundException('用户不存在');
     }
-    if (user.credits < 1) {
+    if (user.role !== 'admin' && user.credits < 1) {
       throw new BadRequestException('积分不足，请充值');
     }
 
@@ -58,8 +63,17 @@ export class ImagesService {
     const saved = await this.imagesRepository.save(image);
 
     // 4. 异步执行生成流程（不阻塞返回）
-    this.processGeneration(saved.id, userId, prompt, model, size, referenceImage).catch((err) => {
-      this.logger.error(`Generation failed for image ${saved.id}: ${err.message}`);
+    this.processGeneration(
+      saved.id,
+      userId,
+      prompt,
+      model,
+      size,
+      referenceImage,
+    ).catch((err) => {
+      this.logger.error(
+        `Generation failed for image ${saved.id}: ${err.message}`,
+      );
     });
 
     return saved;
@@ -78,18 +92,32 @@ export class ImagesService {
   ): Promise<void> {
     try {
       // 调用 AI 生成
-      const result = await this.aiService.generateImage(prompt, model, size, referenceImage);
+      const result = await this.aiService.generateImage(
+        prompt,
+        model,
+        size,
+        referenceImage,
+      );
 
       if (!result.success || !result.imageBuffer) {
         // 生成失败，退还积分
         await this.usersService.addCredits(userId, 1);
-        await this.updateStatus(imageId, 'failed', undefined, undefined, result.error || '生成失败');
+        await this.updateStatus(
+          imageId,
+          'failed',
+          undefined,
+          undefined,
+          result.error || '生成失败',
+        );
         this.logger.log(`Image ${imageId} generation failed, credits refunded`);
         return;
       }
 
       // 上传到 MinIO
-      const imageUrl = await this.minioService.uploadImage(result.imageBuffer, userId);
+      const imageUrl = await this.minioService.uploadImage(
+        result.imageBuffer,
+        userId,
+      );
 
       // 更新状态
       await this.updateStatus(imageId, 'completed', imageUrl);
@@ -99,7 +127,13 @@ export class ImagesService {
       // 异常情况，退还积分
       await this.usersService.addCredits(userId, 1);
       this.logger.error(`Process generation failed: ${error.message}`);
-      await this.updateStatus(imageId, 'failed', undefined, undefined, error.message);
+      await this.updateStatus(
+        imageId,
+        'failed',
+        undefined,
+        undefined,
+        error.message,
+      );
     }
   }
 
@@ -127,7 +161,11 @@ export class ImagesService {
     return this.imagesRepository.findOne({ where: { id } });
   }
 
-  async findByUserId(userId: number, page: number = 1, limit: number = 20): Promise<{ images: Image[]; total: number }> {
+  async findByUserId(
+    userId: number,
+    page: number = 1,
+    limit: number = 20,
+  ): Promise<{ images: Image[]; total: number }> {
     const [images, total] = await this.imagesRepository.findAndCount({
       where: { userId },
       order: { createdAt: 'DESC' },

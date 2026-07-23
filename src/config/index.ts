@@ -9,7 +9,7 @@ export default registerAs('database', () => ({
 }));
 
 export const jwtConfig = registerAs('jwt', () => ({
-  secret: process.env.JWT_SECRET || 'artgen_jwt_secret_2026',
+  secret: process.env.JWT_SECRET || '',
   expiresIn: process.env.JWT_EXPIRES_IN || '7d',
 }));
 
