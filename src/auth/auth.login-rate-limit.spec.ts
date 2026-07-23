@@ -18,6 +18,7 @@ describe('POST /auth/login rate limit', () => {
           provide: AuthService,
           useValue: {
             login: jest.fn().mockResolvedValue({ token: 'test-token' }),
+            register: jest.fn().mockResolvedValue({ token: 'test-token' }),
           },
         },
       ],
@@ -31,17 +32,40 @@ describe('POST /auth/login rate limit', () => {
     await app.close();
   });
 
-  it('rejects the sixth login attempt from one client within a minute', async () => {
+  it('limits each normalized email account independently', async () => {
     const server = app.getHttpServer();
-    const credentials = {
-      email: 'owner@example.com',
+    const password = 'valid-password';
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      await request(server)
+        .post('/auth/login')
+        .send({ email: 'Owner@Example.com', password })
+        .expect(201);
+    }
+
+    await request(server)
+      .post('/auth/login')
+      .send({ email: 'someone-else@example.com', password })
+      .expect(201);
+    await request(server)
+      .post('/auth/login')
+      .send({ email: 'owner@example.com', password })
+      .expect(429);
+  });
+
+  it('does not apply the login limit to registration', async () => {
+    const server = app.getHttpServer();
+    const registration = {
+      username: 'new-owner',
+      email: 'new-owner@example.com',
       password: 'valid-password',
     };
 
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      await request(server).post('/auth/login').send(credentials).expect(201);
+    for (let attempt = 0; attempt < 6; attempt += 1) {
+      await request(server)
+        .post('/auth/register')
+        .send(registration)
+        .expect(201);
     }
-
-    await request(server).post('/auth/login').send(credentials).expect(429);
   });
 });

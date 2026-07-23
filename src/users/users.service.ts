@@ -23,12 +23,23 @@ export class UsersService {
   ) {}
 
   async ensureAdminUser(config: AdminUserConfig): Promise<User> {
-    const existingUser =
-      (await this.findByUsername(config.username)) ??
-      (await this.findByEmail(config.email));
-    if (existingUser) {
-      existingUser.role = 'admin';
-      return this.usersRepository.save(existingUser);
+    const [userByUsername, userByEmail] = await Promise.all([
+      this.findByUsername(config.username),
+      this.findByEmail(config.email),
+    ]);
+
+    if (
+      userByUsername &&
+      (!userByEmail || userByUsername.id !== userByEmail.id)
+    ) {
+      throw new ConflictException(
+        'Configured administrator username and email do not identify one account',
+      );
+    }
+
+    if (userByEmail) {
+      userByEmail.role = 'admin';
+      return this.usersRepository.save(userByEmail);
     }
 
     const passwordHash = await bcrypt.hash(config.password, 10);
