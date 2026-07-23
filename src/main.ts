@@ -27,7 +27,10 @@ async function bootstrap() {
   const configService = app.get(ConfigService);
   const usersService = app.get(UsersService);
   const allowedOrigins = configService
-    .get<string>('FRONTEND_URL', 'http://localhost:3000,http://localhost:3002')
+    .get<string>(
+      'CORS_ALLOWED_ORIGINS',
+      'http://localhost:3000,http://localhost:3002',
+    )
     .split(',')
     .map((origin: string) => origin.trim())
     .filter(Boolean);
