@@ -16,7 +16,11 @@ describe('initializeEnvironment', () => {
 
   it('persists one generated JWT secret for the selected environment', () => {
     const envFile = join(projectDir, '.env.production');
-    writeFileSync(envFile, 'NODE_ENV=production\n', 'utf8');
+    writeFileSync(
+      envFile,
+      'NODE_ENV=production\nADMIN_USERNAME=production-owner\nADMIN_EMAIL=owner@example.com\n',
+      'utf8',
+    );
     const generatedSecret =
       'generated-jwt-secret-that-is-at-least-32-characters';
 

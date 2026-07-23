@@ -18,7 +18,7 @@ describe('initializeEnvironment weak JWT secrets', () => {
     const envFile = join(projectDir, '.env.production');
     writeFileSync(
       envFile,
-      'NODE_ENV=production\nJWT_SECRET=change-me\n',
+      'NODE_ENV=production\nJWT_SECRET=change-me\nADMIN_USERNAME=production-owner\nADMIN_EMAIL=owner@example.com\n',
       'utf8',
     );
     const generatedSecret = 'a'.repeat(64);

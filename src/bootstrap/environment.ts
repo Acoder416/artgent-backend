@@ -31,6 +31,8 @@ interface InitializeEnvironmentOptions {
 const placeholderValues = new Set([
   '',
   'your_jwt_secret_here',
+  'your_admin_username_here',
+  'your_admin_email_here',
   'your_admin_password_here',
 ]);
 
@@ -40,6 +42,22 @@ function hasUsableValue(value: string | undefined): value is string {
 
 function hasUsableJwtSecret(value: string | undefined): value is string {
   return hasUsableValue(value) && value.length >= 32;
+}
+
+function requireConfiguredValue(
+  fileValue: string | undefined,
+  environmentValue: string | undefined,
+  key: string,
+  envFileName: string,
+): string {
+  if (hasUsableValue(fileValue)) {
+    return fileValue;
+  }
+  if (hasUsableValue(environmentValue)) {
+    return environmentValue;
+  }
+
+  throw new Error(`${key} must be configured in ${envFileName}`);
 }
 
 function setEnvironmentValue(
@@ -61,7 +79,8 @@ function setEnvironmentValue(
 export function initializeEnvironment(
   options: InitializeEnvironmentOptions,
 ): Record<string, string> {
-  const envFile = resolve(options.projectDir, `.env.${options.environment}`);
+  const envFileName = `.env.${options.environment}`;
+  const envFile = resolve(options.projectDir, envFileName);
   let content = existsSync(envFile)
     ? readFileSync(envFile, 'utf8')
     : `NODE_ENV=${options.environment}\n`;
@@ -75,16 +94,18 @@ export function initializeEnvironment(
           options.generateSecret ??
           (() => randomBytes(48).toString('base64url'))
         )();
-  const adminUsername = hasUsableValue(fileConfig.ADMIN_USERNAME)
-    ? fileConfig.ADMIN_USERNAME
-    : hasUsableValue(environmentConfig.ADMIN_USERNAME)
-      ? environmentConfig.ADMIN_USERNAME
-      : 'admin';
-  const adminEmail = hasUsableValue(fileConfig.ADMIN_EMAIL)
-    ? fileConfig.ADMIN_EMAIL
-    : hasUsableValue(environmentConfig.ADMIN_EMAIL)
-      ? environmentConfig.ADMIN_EMAIL
-      : 'admin@artgen.local';
+  const adminUsername = requireConfiguredValue(
+    fileConfig.ADMIN_USERNAME,
+    environmentConfig.ADMIN_USERNAME,
+    'ADMIN_USERNAME',
+    envFileName,
+  );
+  const adminEmail = requireConfiguredValue(
+    fileConfig.ADMIN_EMAIL,
+    environmentConfig.ADMIN_EMAIL,
+    'ADMIN_EMAIL',
+    envFileName,
+  );
   const adminPassword = hasUsableValue(fileConfig.ADMIN_PASSWORD)
     ? fileConfig.ADMIN_PASSWORD
     : hasUsableValue(environmentConfig.ADMIN_PASSWORD)

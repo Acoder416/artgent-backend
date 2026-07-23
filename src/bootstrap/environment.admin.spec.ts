@@ -18,7 +18,7 @@ describe('initializeEnvironment administrator credentials', () => {
     const envFile = join(projectDir, '.env.development');
     writeFileSync(
       envFile,
-      `NODE_ENV=development\nJWT_SECRET=${'j'.repeat(64)}\n`,
+      `NODE_ENV=development\nJWT_SECRET=${'j'.repeat(64)}\nADMIN_USERNAME=local-owner\nADMIN_EMAIL=owner@example.com\n`,
       'utf8',
     );
 
@@ -29,8 +29,8 @@ describe('initializeEnvironment administrator credentials', () => {
     });
 
     expect(config).toMatchObject({
-      ADMIN_USERNAME: 'admin',
-      ADMIN_EMAIL: 'admin@artgen.local',
+      ADMIN_USERNAME: 'local-owner',
+      ADMIN_EMAIL: 'owner@example.com',
       ADMIN_PASSWORD: 'generated-admin-password',
     });
     expect(readFileSync(envFile, 'utf8')).toContain(
