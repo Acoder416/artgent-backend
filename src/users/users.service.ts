@@ -23,7 +23,9 @@ export class UsersService {
   ) {}
 
   async ensureAdminUser(config: AdminUserConfig): Promise<User> {
-    const existingUser = await this.findByUsername(config.username);
+    const existingUser =
+      (await this.findByUsername(config.username)) ??
+      (await this.findByEmail(config.email));
     if (existingUser) {
       existingUser.role = 'admin';
       return this.usersRepository.save(existingUser);

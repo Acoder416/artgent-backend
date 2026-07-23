@@ -17,22 +17,24 @@ describe('initializeEnvironment', () => {
   it('persists one generated JWT secret for the selected environment', () => {
     const envFile = join(projectDir, '.env.production');
     writeFileSync(envFile, 'NODE_ENV=production\n', 'utf8');
+    const generatedSecret =
+      'generated-jwt-secret-that-is-at-least-32-characters';
 
     const first = initializeEnvironment({
       environment: 'production',
       projectDir,
-      generateSecret: () => 'generated-jwt-secret',
+      generateSecret: () => generatedSecret,
     });
     const second = initializeEnvironment({
       environment: 'production',
       projectDir,
-      generateSecret: () => 'different-secret',
+      generateSecret: () => 'different-secret-that-is-at-least-32-characters',
     });
 
-    expect(first.JWT_SECRET).toBe('generated-jwt-secret');
-    expect(second.JWT_SECRET).toBe('generated-jwt-secret');
+    expect(first.JWT_SECRET).toBe(generatedSecret);
+    expect(second.JWT_SECRET).toBe(generatedSecret);
     expect(readFileSync(envFile, 'utf8')).toContain(
-      'JWT_SECRET=generated-jwt-secret',
+      `JWT_SECRET=${generatedSecret}`,
     );
   });
 });

@@ -18,7 +18,7 @@ describe('initializeEnvironment administrator credentials', () => {
     const envFile = join(projectDir, '.env.development');
     writeFileSync(
       envFile,
-      'NODE_ENV=development\nJWT_SECRET=existing-jwt-secret\n',
+      `NODE_ENV=development\nJWT_SECRET=${'j'.repeat(64)}\n`,
       'utf8',
     );
 

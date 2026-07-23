@@ -38,6 +38,10 @@ function hasUsableValue(value: string | undefined): value is string {
   return value !== undefined && !placeholderValues.has(value.trim());
 }
 
+function hasUsableJwtSecret(value: string | undefined): value is string {
+  return hasUsableValue(value) && value.length >= 32;
+}
+
 function setEnvironmentValue(
   content: string,
   key: string,
@@ -63,9 +67,9 @@ export function initializeEnvironment(
     : `NODE_ENV=${options.environment}\n`;
   let fileConfig = parse(content);
   const environmentConfig = options.environmentVariables ?? {};
-  const jwtSecret = hasUsableValue(fileConfig.JWT_SECRET)
+  const jwtSecret = hasUsableJwtSecret(fileConfig.JWT_SECRET)
     ? fileConfig.JWT_SECRET
-    : hasUsableValue(environmentConfig.JWT_SECRET)
+    : hasUsableJwtSecret(environmentConfig.JWT_SECRET)
       ? environmentConfig.JWT_SECRET
       : (
           options.generateSecret ??
