@@ -19,7 +19,7 @@ class FakeMysqlServer {
         return Promise.resolve(undefined);
       },
       end: () => Promise.resolve(undefined),
-    }) satisfies DatabaseConnection;
+    } satisfies DatabaseConnection);
 }
 
 describe('ensureDatabaseExists', () => {
