@@ -33,20 +33,42 @@ export class MinioService implements OnModuleInit {
    * @param ext 文件扩展名 (png/jpg)
    * @returns 公开访问URL
    */
-  async uploadImage(imageBuffer: Buffer, userId: number, ext: string = 'png'): Promise<string> {
+  async uploadImage(
+    imageBuffer: Buffer,
+    userId: number,
+    ext: string = 'png',
+  ): Promise<string> {
     const key = `images/${userId}/${Date.now()}-${randomUUID().slice(0, 8)}.${ext}`;
-    
+
     await this.minioClient.putObject(
       this.bucket,
       key,
       imageBuffer,
       imageBuffer.length,
-      { 'Content-Type': `image/${ext}` },
+      {
+        'Content-Type':
+          ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : `image/${ext}`,
+      },
     );
 
     const url = `${this.publicUrl}/${key}`;
     this.logger.log(`Image uploaded: ${key}`);
     return url;
+  }
+
+  async deleteImageByUrl(imageUrl: string): Promise<void> {
+    const publicUrl = this.publicUrl.replace(/\/+$/, '');
+    const prefix = publicUrl ? `${publicUrl}/` : '/';
+    if (!imageUrl.startsWith(prefix)) return;
+    const key = imageUrl.slice(prefix.length);
+    if (!key.startsWith('images/')) return;
+
+    try {
+      await this.deleteImage(key);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`Unable to delete image ${key}: ${message}`);
+    }
   }
 
   /**
