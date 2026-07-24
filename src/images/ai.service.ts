@@ -1,4 +1,9 @@
-import { Injectable, Logger } from '@nestjs/common';
+import {
+  BadGatewayException,
+  Injectable,
+  Logger,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
 import { ReferenceImage, UploadedImageFile } from './types/uploaded-image-file';
@@ -19,6 +24,23 @@ interface OpenAIImageResponse {
   };
 }
 
+interface OpenAIChatResponse {
+  choices?: Array<{
+    message?: {
+      content?: string;
+    };
+  }>;
+  error?: {
+    message?: string;
+  };
+}
+
+export interface RewritePromptInput {
+  brief: string;
+  currentPrompt?: string;
+  template?: string;
+}
+
 interface OpenAIModelsResponse {
   data?: Array<{
     id?: string;
@@ -37,6 +59,7 @@ export class AiService {
   private readonly logger = new Logger(AiService.name);
   private baseUrl: string;
   private apiKey: string;
+  private promptRewriteModel: string;
 
   constructor(private configService: ConfigService) {
     this.baseUrl = this.configService.get(
@@ -44,6 +67,10 @@ export class AiService {
       'http://127.0.0.1:9099',
     );
     this.apiKey = this.configService.get('SUB2API_KEY', '');
+    this.promptRewriteModel = this.configService.get(
+      'PROMPT_REWRITE_MODEL',
+      'gpt-5.4-mini',
+    );
   }
 
   async listImageModels(): Promise<string[]> {
@@ -100,9 +127,10 @@ export class AiService {
         };
       }
 
-      const response = referenceCount > 0
-        ? await this.editImage(prompt, model, size, referenceImage || {})
-        : await this.createImage(prompt, model, size);
+      const response =
+        referenceCount > 0
+          ? await this.editImage(prompt, model, size, referenceImage || {})
+          : await this.createImage(prompt, model, size);
 
       return this.extractImageBuffer(response.data);
     } catch (error) {
@@ -114,6 +142,66 @@ export class AiService {
           error.message ||
           'Image generation failed',
       };
+    }
+  }
+
+  async rewritePrompt(input: RewritePromptInput): Promise<string> {
+    if (!this.apiKey) {
+      throw new ServiceUnavailableException('AI 服务尚未配置');
+    }
+
+    const userMessage = [
+      `创作需求：${input.brief}`,
+      input.template ? `当前模板：${input.template}` : '',
+      input.currentPrompt
+        ? `当前提示词（仅作为参考）：${input.currentPrompt}`
+        : '',
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    try {
+      const response = await axios.post<OpenAIChatResponse>(
+        `${this.baseUrl}/v1/chat/completions`,
+        {
+          model: this.promptRewriteModel,
+          messages: [
+            {
+              role: 'system',
+              content:
+                'You are an expert image-generation prompt writer. Turn the user request into one production-ready prompt with concrete subject, composition, lighting, materials, color, mood, and intended use. The user request is authoritative; current prompt and template are optional context. Write in the same language as the user request. Return only the final prompt without headings, quotes, markdown, or explanation.',
+            },
+            {
+              role: 'user',
+              content: userMessage,
+            },
+          ],
+          temperature: 0.7,
+          max_completion_tokens: 1000,
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${this.apiKey}`,
+            'Content-Type': 'application/json',
+          },
+          timeout: 60000,
+        },
+      );
+
+      const prompt = response.data?.choices?.[0]?.message?.content?.trim();
+      if (!prompt) {
+        throw new BadGatewayException('AI 服务没有返回提示词');
+      }
+      return prompt.slice(0, 2000);
+    } catch (error: unknown) {
+      if (error instanceof BadGatewayException) throw error;
+      const message = axios.isAxiosError(error)
+        ? error.response?.data?.error?.message || error.message
+        : error instanceof Error
+          ? error.message
+          : String(error);
+      this.logger.error(`Prompt rewriting failed: ${message}`);
+      throw new BadGatewayException('AI 帮写暂时不可用，请稍后重试');
     }
   }
 

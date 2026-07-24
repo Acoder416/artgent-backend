@@ -1,19 +1,15 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { ScheduleModule } from '@nestjs/schedule';
 import { AuthModule } from './auth/auth.module';
-import { UsersModule } from './users/users.module';
 import { ImagesModule } from './images/images.module';
+import { UsersModule } from './users/users.module';
 
 const envFile = `.env.${process.env.NODE_ENV || 'development'}`;
 
 @Module({
   imports: [
-    ConfigModule.forRoot({
-      isGlobal: true,
-      envFilePath: envFile,
-    }),
+    ConfigModule.forRoot({ isGlobal: true, envFilePath: envFile }),
     TypeOrmModule.forRootAsync({
       imports: [ConfigModule],
       useFactory: (configService: ConfigService) => ({
@@ -26,10 +22,11 @@ const envFile = `.env.${process.env.NODE_ENV || 'development'}`;
         entities: [__dirname + '/**/*.entity{.ts,.js}'],
         synchronize: true,
         charset: 'utf8mb4',
+        retryAttempts: 5,
+        retryDelay: 2_000,
       }),
       inject: [ConfigService],
     }),
-    ScheduleModule.forRoot(),
     AuthModule,
     UsersModule,
     ImagesModule,
