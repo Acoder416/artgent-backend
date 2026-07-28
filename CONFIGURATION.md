@@ -20,8 +20,12 @@ Browser code always calls `/api`. In development, Next.js rewrites that path to
 build time or, preferably, route `/api/*` to the Nest backend in the public
 reverse proxy. No backend address belongs in a `NEXT_PUBLIC_*` variable.
 
-`CORS_ALLOWED_ORIGINS` is only needed for browsers that call Nest directly. It
-accepts a comma-separated allowlist and intentionally rejects `*`.
+CORS is disabled by default. This is the recommended setup when Next.js or the
+production reverse proxy serves `/api/*` from the same public origin.
+
+Only set `ENABLE_CORS=true` when browser clients call Nest directly from a
+different origin. In that case, `CORS_ALLOWED_ORIGINS` must contain the
+comma-separated browser origins; wildcard origins are intentionally rejected.
 
 ## AI lines
 

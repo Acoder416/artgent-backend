@@ -19,6 +19,12 @@ export function parsePort(value: string | undefined): number {
   return port;
 }
 
+export function isCorsEnabled(value: string | undefined): boolean {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized || normalized === 'false') return false;
+  if (normalized === 'true') return true;
+  throw new Error('ENABLE_CORS must be \"true\" or \"false\"');
+}
 export function parseAllowedOrigins(value: string | undefined): string[] {
   if (value === undefined) {
     throw new Error('CORS_ALLOWED_ORIGINS must be configured');
@@ -28,6 +34,10 @@ export function parseAllowedOrigins(value: string | undefined): string[] {
     .split(',')
     .map((origin) => origin.trim().replace(/\/$/, ''))
     .filter(Boolean);
+
+  if (origins.length === 0) {
+    throw new Error('CORS_ALLOWED_ORIGINS must contain at least one origin');
+  }
 
   for (const origin of origins) {
     if (origin === '*') {

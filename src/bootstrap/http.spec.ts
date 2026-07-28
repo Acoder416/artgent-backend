@@ -1,19 +1,37 @@
 import { createServer, Server } from 'node:net';
 import {
   assertPortAvailable,
+  isCorsEnabled,
   parseAllowedOrigins,
   parsePort,
   PortInUseError,
 } from './http';
 
 describe('HTTP bootstrap configuration', () => {
+  it('keeps CORS disabled unless it is explicitly enabled', () => {
+    expect(isCorsEnabled(undefined)).toBe(false);
+    expect(isCorsEnabled('')).toBe(false);
+    expect(isCorsEnabled('false')).toBe(false);
+    expect(isCorsEnabled('true')).toBe(true);
+  });
+
+  it('rejects invalid CORS toggle values', () => {
+    expect(() => isCorsEnabled('yes')).toThrow(
+      'ENABLE_CORS must be \"true\" or \"false\"',
+    );
+  });
   it('parses a comma-separated CORS allowlist', () => {
     expect(
       parseAllowedOrigins('http://localhost:3016, https://image.lzljz.top/'),
     ).toEqual(['http://localhost:3016', 'https://image.lzljz.top']);
   });
 
-  it('rejects wildcard CORS with credentials', () => {
+  it('rejects an empty CORS allowlist', () => {
+    expect(() => parseAllowedOrigins('')).toThrow(
+      'CORS_ALLOWED_ORIGINS must contain at least one origin',
+    );
+  });
+  it('rejects wildcard CORS origins', () => {
     expect(() => parseAllowedOrigins('*')).toThrow(
       'CORS_ALLOWED_ORIGINS cannot contain "*"',
     );

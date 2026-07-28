@@ -8,6 +8,7 @@ import {
 } from './bootstrap/environment';
 import {
   assertPortAvailable,
+  isCorsEnabled,
   parseAllowedOrigins,
   parsePort,
   PortInUseError,
@@ -35,7 +36,6 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   const configService = app.get(ConfigService);
   const usersService = app.get(UsersService);
-  const allowedOrigins = parseAllowedOrigins(config.CORS_ALLOWED_ORIGINS);
 
   await usersService.ensureAdminUser({
     username: configService.getOrThrow<string>('ADMIN_USERNAME'),
@@ -43,10 +43,11 @@ async function bootstrap() {
     password: configService.getOrThrow<string>('ADMIN_PASSWORD'),
   });
 
-  app.enableCors({
-    origin: allowedOrigins,
-    credentials: true,
-  });
+  if (isCorsEnabled(config.ENABLE_CORS)) {
+    app.enableCors({
+      origin: parseAllowedOrigins(config.CORS_ALLOWED_ORIGINS),
+    });
+  }
 
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
   app.setGlobalPrefix('api');
