@@ -21,5 +21,10 @@ describe('MySQL entity metadata', () => {
         }
       ).buildMetadatas(),
     ).resolves.toBeUndefined();
+
+    const lineIdColumn = dataSource
+      .getMetadata(Image)
+      .findColumnWithPropertyName('lineId');
+    expect(lineIdColumn?.length).toBe('64');
   });
 });

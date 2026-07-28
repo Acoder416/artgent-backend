@@ -9,6 +9,7 @@ import {
   Post,
   Query,
   Request,
+  StreamableFile,
   UploadedFiles,
   UseGuards,
   UseInterceptors,
@@ -17,6 +18,7 @@ import {
 import { FilesInterceptor } from '@nestjs/platform-express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { AiService } from './ai.service';
+import type { AiLineId } from './ai.service';
 import { CreateImageDto } from './dto/create-image.dto';
 import { RewritePromptDto } from './dto/rewrite-prompt.dto';
 import { ImagesService } from './images.service';
@@ -29,9 +31,14 @@ export class ImagesController {
     private readonly aiService: AiService,
   ) {}
 
+  @Get('lines')
+  lines() {
+    return this.aiService.listLines();
+  }
+
   @Get('models')
-  async models() {
-    return { models: await this.aiService.listImageModels() };
+  async models(@Query('lineId') lineId?: AiLineId) {
+    return { models: await this.aiService.listImageModels(lineId) };
   }
 
   @Post('rewrite-prompt')
@@ -60,6 +67,7 @@ export class ImagesController {
       {
         prompt: dto.prompt,
         model: dto.model,
+        lineId: dto.lineId,
         template: dto.template,
         aspectRatio: dto.aspectRatio,
         resolution: dto.resolution,
@@ -75,6 +83,17 @@ export class ImagesController {
   @UseGuards(JwtAuthGuard)
   findAll(@Request() req, @Query('page') page = 1, @Query('limit') limit = 60) {
     return this.imagesService.findByUserId(req.user.id, page, limit);
+  }
+
+  @Get(':id/download')
+  @UseGuards(JwtAuthGuard)
+  async download(@Request() req, @Param('id', ParseIntPipe) id: number) {
+    const file = await this.imagesService.getDownload(id, req.user.id);
+    return new StreamableFile(file.stream, {
+      type: file.contentType,
+      length: file.size,
+      disposition: `attachment; filename="${file.filename}"`,
+    });
   }
 
   @Get(':id')

@@ -1,0 +1,19 @@
+{
+  "defaultLineId": "line-a",
+  "lines": [
+    {
+      "id": "line-a",
+      "name": "线路 A",
+      "baseUrlEnv": "AI_LINE_A_BASE_URL",
+      "apiKeyEnv": "AI_LINE_A_API_KEY",
+      "fallbackApiKeyEnv": "SUB2API_KEY"
+    },
+    {
+      "id": "line-b",
+      "name": "线路 B",
+      "baseUrlEnv": "AI_LINE_B_BASE_URL",
+      "apiKeyEnv": "AI_LINE_B_API_KEY",
+      "fallbackApiKeyEnv": "SUB2API_KEY"
+    }
+  ]
+}

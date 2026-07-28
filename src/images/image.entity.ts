@@ -1,5 +1,13 @@
-import { Column, CreateDateColumn, Entity, JoinColumn, ManyToOne, PrimaryGeneratedColumn } from 'typeorm';
+import {
+  Column,
+  CreateDateColumn,
+  Entity,
+  JoinColumn,
+  ManyToOne,
+  PrimaryGeneratedColumn,
+} from 'typeorm';
 import { User } from '../users/user.entity';
+import { AI_LINE_ID_MAX_LENGTH } from './ai-line';
 
 @Entity('images')
 export class Image {
@@ -21,6 +29,13 @@ export class Image {
   @Column({ length: 100, default: 'gpt-image-2' })
   model: string;
 
+  @Column({
+    length: AI_LINE_ID_MAX_LENGTH,
+    name: 'line_id',
+    default: 'line-a',
+  })
+  lineId: string;
+
   @Column({ length: 10, name: 'aspect_ratio', default: '1:1' })
   aspectRatio: string;
 
@@ -36,7 +51,11 @@ export class Image {
   @Column('simple-json', { name: 'reference_image_urls', nullable: true })
   referenceImageUrls: string[] | null;
 
-  @Column({ type: 'enum', enum: ['pending', 'generating', 'completed', 'failed'], default: 'pending' })
+  @Column({
+    type: 'enum',
+    enum: ['pending', 'generating', 'completed', 'failed'],
+    default: 'pending',
+  })
   status: string;
 
   @Column('text', { name: 'error_message', nullable: true })

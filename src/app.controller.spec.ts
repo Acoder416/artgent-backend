@@ -19,4 +19,13 @@ describe('AppController', () => {
       expect(appController.getHello()).toBe('Hello World!');
     });
   });
+
+  describe('health', () => {
+    it('identifies the running ArtGen backend', () => {
+      expect(appController.getHealth()).toEqual({
+        service: 'artgen-backend',
+        status: 'ok',
+      });
+    });
+  });
 });

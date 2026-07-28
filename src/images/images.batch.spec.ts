@@ -34,6 +34,7 @@ describe('ImagesService batch generation', () => {
         Promise.resolve(rows.find((item) => item.id === where.id) || null),
     } as unknown as Repository<Image>;
     const ai = {
+      resolveLineId: (lineId?: string) => lineId || 'line-a',
       generateImage: () => new Promise(() => undefined),
     } as unknown as AiService;
     const service = new ImagesService(

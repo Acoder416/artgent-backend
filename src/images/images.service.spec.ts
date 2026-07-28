@@ -54,7 +54,11 @@ describe('ImagesService administrator credits', () => {
       credits: 0,
       role: 'admin',
     });
-    const config = new ConfigService({ SUB2API_KEY: '' });
+    const config = new ConfigService({
+      AI_LINE_A_BASE_URL: 'https://gateway.test',
+      AI_LINE_B_BASE_URL: 'https://gateway.test',
+      SUB2API_KEY: '',
+    });
     const usersService = new UsersService(createUserRepository(administrator));
     const service = new ImagesService(
       createImageRepository(),

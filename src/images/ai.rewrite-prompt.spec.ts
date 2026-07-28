@@ -22,7 +22,8 @@ describe('AiService prompt rewriting', () => {
     });
     const service = new AiService(
       new ConfigService({
-        SUB2API_BASE_URL: 'https://gateway.test',
+        AI_LINE_A_BASE_URL: 'https://gateway.test',
+        AI_LINE_B_BASE_URL: 'https://gateway.test',
         SUB2API_KEY: 'test-key',
         PROMPT_REWRITE_MODEL: 'test-chat-model',
       }),
@@ -53,7 +54,13 @@ describe('AiService prompt rewriting', () => {
   });
 
   it('does not fall back to fixed copy when the AI key is missing', async () => {
-    const service = new AiService(new ConfigService({ SUB2API_KEY: '' }));
+    const service = new AiService(
+      new ConfigService({
+        AI_LINE_A_BASE_URL: 'https://gateway.test',
+        AI_LINE_B_BASE_URL: 'https://gateway.test',
+        SUB2API_KEY: '',
+      }),
+    );
 
     await expect(
       service.rewritePrompt({ brief: 'Write a product prompt' }),

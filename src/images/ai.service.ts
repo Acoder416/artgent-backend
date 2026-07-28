@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   BadGatewayException,
   Injectable,
   Logger,
@@ -6,12 +7,21 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
+import type { AiLineId } from './ai-line';
+import { AiLineConnection, loadAiLinesConfiguration } from './ai-lines.config';
 import { ReferenceImage, UploadedImageFile } from './types/uploaded-image-file';
 
 export interface GenerateImageResult {
   success: boolean;
   imageBuffer?: Buffer;
   error?: string;
+}
+
+export type { AiLineId } from './ai-line';
+
+export interface AiLineSummary {
+  id: AiLineId;
+  name: string;
 }
 
 interface OpenAIImageResponse {
@@ -39,6 +49,7 @@ export interface RewritePromptInput {
   brief: string;
   currentPrompt?: string;
   template?: string;
+  lineId?: AiLineId;
 }
 
 interface OpenAIModelsResponse {
@@ -57,33 +68,56 @@ const fallbackImageModels = [
 @Injectable()
 export class AiService {
   private readonly logger = new Logger(AiService.name);
-  private baseUrl: string;
-  private apiKey: string;
-  private promptRewriteModel: string;
+  private readonly connections: Map<AiLineId, AiLineConnection>;
+  private readonly defaultLineId: AiLineId;
+  private readonly promptRewriteModel: string;
 
   constructor(private configService: ConfigService) {
-    this.baseUrl = this.configService.get(
-      'SUB2API_BASE_URL',
-      'http://127.0.0.1:9099',
+    const configuration = loadAiLinesConfiguration({
+      projectDir: process.cwd(),
+      configFile: this.configService.get<string>(
+        'AI_LINES_CONFIG_FILE',
+        'config/ai-lines.json',
+      ),
+      getEnvironmentValue: (key) => this.configService.get<string>(key),
+      defaultLineOverride: this.configService.get<string>('AI_DEFAULT_LINE'),
+    });
+    this.defaultLineId = configuration.defaultLineId;
+    this.connections = new Map(
+      configuration.lines.map((connection) => [connection.id, connection]),
     );
-    this.apiKey = this.configService.get('SUB2API_KEY', '');
     this.promptRewriteModel = this.configService.get(
       'PROMPT_REWRITE_MODEL',
       'gpt-5.4-mini',
     );
   }
 
-  async listImageModels(): Promise<string[]> {
-    if (!this.apiKey) {
+  listLines(): { lines: AiLineSummary[]; defaultLineId: AiLineId } {
+    return {
+      lines: Array.from(this.connections.values(), ({ id, name }) => ({
+        id,
+        name,
+      })),
+      defaultLineId: this.defaultLineId,
+    };
+  }
+
+  resolveLineId(lineId?: AiLineId): AiLineId {
+    return this.resolveConnection(lineId).id;
+  }
+
+  async listImageModels(lineId?: AiLineId): Promise<string[]> {
+    const connection = this.resolveConnection(lineId);
+    if (!connection.apiKey) {
       return fallbackImageModels;
     }
 
     try {
       const response = await axios.get<OpenAIModelsResponse>(
-        `${this.baseUrl}/v1/models`,
+        `${connection.baseUrl}/v1/models`,
         {
           headers: {
-            Authorization: `Bearer ${this.apiKey}`,
+            Authorization: `Bearer ${connection.apiKey}`,
           },
           timeout: 30000,
         },
@@ -106,7 +140,9 @@ export class AiService {
     model: string = 'gpt-image-2',
     size: string = '1024x1024',
     referenceImage?: ReferenceImage,
+    lineId?: AiLineId,
   ): Promise<GenerateImageResult> {
+    const connection = this.resolveConnection(lineId);
     const referenceCount =
       (referenceImage?.files?.length || 0) +
       (referenceImage?.urls?.length || 0) +
@@ -114,13 +150,13 @@ export class AiService {
       (referenceImage?.url ? 1 : 0);
 
     this.logger.log(
-      `Generating image: model=${model}, size=${size}, mode=${
+      `Generating image: line=${connection.id}, model=${model}, size=${size}, mode=${
         referenceCount > 0 ? 'edit' : 'generation'
       }, prompt="${prompt.slice(0, 50)}..."`,
     );
 
     try {
-      if (!this.apiKey) {
+      if (!connection.apiKey) {
         return {
           success: false,
           error: 'Sub2API key is not configured',
@@ -129,10 +165,16 @@ export class AiService {
 
       const response =
         referenceCount > 0
-          ? await this.editImage(prompt, model, size, referenceImage || {})
-          : await this.createImage(prompt, model, size);
+          ? await this.editImage(
+              prompt,
+              model,
+              size,
+              referenceImage || {},
+              connection,
+            )
+          : await this.createImage(prompt, model, size, connection);
 
-      return this.extractImageBuffer(response.data);
+      return await this.extractImageBuffer(response.data);
     } catch (error) {
       this.logger.error(`Image generation failed: ${error.message}`);
       return {
@@ -146,7 +188,8 @@ export class AiService {
   }
 
   async rewritePrompt(input: RewritePromptInput): Promise<string> {
-    if (!this.apiKey) {
+    const connection = this.resolveConnection(input.lineId);
+    if (!connection.apiKey) {
       throw new ServiceUnavailableException('AI 服务尚未配置');
     }
 
@@ -162,7 +205,7 @@ export class AiService {
 
     try {
       const response = await axios.post<OpenAIChatResponse>(
-        `${this.baseUrl}/v1/chat/completions`,
+        `${connection.baseUrl}/v1/chat/completions`,
         {
           model: this.promptRewriteModel,
           messages: [
@@ -181,7 +224,7 @@ export class AiService {
         },
         {
           headers: {
-            Authorization: `Bearer ${this.apiKey}`,
+            Authorization: `Bearer ${connection.apiKey}`,
             'Content-Type': 'application/json',
           },
           timeout: 60000,
@@ -205,9 +248,14 @@ export class AiService {
     }
   }
 
-  private async createImage(prompt: string, model: string, size: string) {
+  private async createImage(
+    prompt: string,
+    model: string,
+    size: string,
+    connection: AiLineConnection,
+  ) {
     return axios.post<OpenAIImageResponse>(
-      `${this.baseUrl}/v1/images/generations`,
+      `${connection.baseUrl}/v1/images/generations`,
       {
         model,
         prompt,
@@ -217,7 +265,7 @@ export class AiService {
       },
       {
         headers: {
-          Authorization: `Bearer ${this.apiKey}`,
+          Authorization: `Bearer ${connection.apiKey}`,
           'Content-Type': 'application/json',
         },
         timeout: 1200000,
@@ -230,6 +278,7 @@ export class AiService {
     model: string,
     size: string,
     referenceImage: ReferenceImage,
+    connection: AiLineConnection,
   ) {
     const body: Record<string, unknown> = {
       model,
@@ -240,7 +289,7 @@ export class AiService {
     };
     let data: FormData | Record<string, unknown> = body;
     let headers: Record<string, string> = {
-      Authorization: `Bearer ${this.apiKey}`,
+      Authorization: `Bearer ${connection.apiKey}`,
       'Content-Type': 'application/json',
     };
     const files = [
@@ -270,7 +319,7 @@ export class AiService {
 
       data = formData;
       headers = {
-        Authorization: `Bearer ${this.apiKey}`,
+        Authorization: `Bearer ${connection.apiKey}`,
       };
     } else {
       body.images = [
@@ -280,7 +329,7 @@ export class AiService {
     }
 
     return axios.post<OpenAIImageResponse>(
-      `${this.baseUrl}/v1/images/edits`,
+      `${connection.baseUrl}/v1/images/edits`,
       data,
       {
         headers,
@@ -318,10 +367,7 @@ export class AiService {
     }
 
     if (image?.url) {
-      const imageResponse = await axios.get<ArrayBuffer>(image.url, {
-        responseType: 'arraybuffer',
-        timeout: 1200000,
-      });
+      const imageResponse = await this.downloadGeneratedImage(image.url);
 
       return {
         success: true,
@@ -334,5 +380,60 @@ export class AiService {
       error:
         response.error?.message || 'Image generation API returned no image',
     };
+  }
+
+  private resolveConnection(lineId?: AiLineId): AiLineConnection {
+    const selectedLineId = lineId || this.defaultLineId;
+    const connection = this.connections.get(selectedLineId);
+    if (!connection) {
+      throw new BadRequestException(`Unknown AI line: ${selectedLineId}`);
+    }
+    return connection;
+  }
+
+  private async downloadGeneratedImage(imageUrl: string) {
+    const attempts = 4;
+
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      try {
+        return await axios.get<ArrayBuffer>(imageUrl, {
+          responseType: 'arraybuffer',
+          timeout: 120000,
+        });
+      } catch (error: unknown) {
+        if (attempt === attempts || !this.isTransientNetworkError(error)) {
+          throw error;
+        }
+
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.warn(
+          `Generated image download failed (${attempt}/${attempts}): ${message}`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, attempt * 250));
+      }
+    }
+
+    throw new Error('Generated image download failed');
+  }
+
+  private isTransientNetworkError(error: unknown): boolean {
+    const code =
+      typeof error === 'object' && error && 'code' in error
+        ? String(error.code)
+        : '';
+    const status = axios.isAxiosError(error)
+      ? error.response?.status
+      : undefined;
+
+    return (
+      [
+        'ECONNRESET',
+        'ETIMEDOUT',
+        'ECONNABORTED',
+        'EPIPE',
+        'EAI_AGAIN',
+      ].includes(code) ||
+      (status !== undefined && status >= 500)
+    );
   }
 }

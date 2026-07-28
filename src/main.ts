@@ -6,6 +6,12 @@ import {
   initializeEnvironment,
   resolveEnvironment,
 } from './bootstrap/environment';
+import {
+  assertPortAvailable,
+  parseAllowedOrigins,
+  parsePort,
+  PortInUseError,
+} from './bootstrap/http';
 import { UsersService } from './users/users.service';
 
 async function bootstrap() {
@@ -18,6 +24,9 @@ async function bootstrap() {
   });
   Object.assign(process.env, config);
 
+  const port = parsePort(config.PORT || '3001');
+  await assertPortAvailable(port);
+
   await ensureDatabaseExists(config);
   console.log(`[DB] Database "${config.DB_DATABASE || 'artgen'}" ensured`);
 
@@ -26,11 +35,7 @@ async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   const configService = app.get(ConfigService);
   const usersService = app.get(UsersService);
-  const allowedOrigins = configService
-    .get<string>('CORS_ALLOWED_ORIGINS', 'http://localhost:3000')
-    .split(',')
-    .map((origin: string) => origin.trim())
-    .filter(Boolean);
+  const allowedOrigins = parseAllowedOrigins(config.CORS_ALLOWED_ORIGINS);
 
   await usersService.ensureAdminUser({
     username: configService.getOrThrow<string>('ADMIN_USERNAME'),
@@ -46,7 +51,6 @@ async function bootstrap() {
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
   app.setGlobalPrefix('api');
 
-  const port = configService.get<string | number>('PORT', 3001);
   await app.listen(port);
   console.log(
     `Application is running in ${environment} mode on: http://localhost:${port}`,
@@ -54,6 +58,10 @@ async function bootstrap() {
 }
 
 void bootstrap().catch((error: unknown) => {
-  console.error('Application failed to start', error);
+  if (error instanceof PortInUseError) {
+    console.error(error.message);
+  } else {
+    console.error('Application failed to start', error);
+  }
   process.exitCode = 1;
 });

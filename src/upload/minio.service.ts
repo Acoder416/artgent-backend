@@ -56,12 +56,19 @@ export class MinioService implements OnModuleInit {
     return url;
   }
 
+  async openImageByUrl(imageUrl: string) {
+    const key = this.getImageKey(imageUrl);
+    if (!key) throw new Error('Unsupported image URL');
+
+    const stat = await this.minioClient.statObject(this.bucket, key);
+    const stream = await this.minioClient.getObject(this.bucket, key);
+    const contentType = stat.metaData?.['content-type'] || this.contentTypeForKey(key);
+    return { stream, key, size: stat.size, contentType };
+  }
+
   async deleteImageByUrl(imageUrl: string): Promise<void> {
-    const publicUrl = this.publicUrl.replace(/\/+$/, '');
-    const prefix = publicUrl ? `${publicUrl}/` : '/';
-    if (!imageUrl.startsWith(prefix)) return;
-    const key = imageUrl.slice(prefix.length);
-    if (!key.startsWith('images/')) return;
+    const key = this.getImageKey(imageUrl);
+    if (!key) return;
 
     try {
       await this.deleteImage(key);
@@ -78,5 +85,20 @@ export class MinioService implements OnModuleInit {
   async deleteImage(key: string): Promise<void> {
     await this.minioClient.removeObject(this.bucket, key);
     this.logger.log(`Image deleted: ${key}`);
+  }
+
+  private getImageKey(imageUrl: string): string | null {
+    const publicUrl = this.publicUrl.replace(/\/+$/, '');
+    const prefix = publicUrl ? `${publicUrl}/` : '/';
+    if (!imageUrl.startsWith(prefix)) return null;
+    const key = imageUrl.slice(prefix.length);
+    return key.startsWith('images/') ? key : null;
+  }
+
+  private contentTypeForKey(key: string): string {
+    if (/\.jpe?g$/i.test(key)) return 'image/jpeg';
+    if (/\.webp$/i.test(key)) return 'image/webp';
+    if (/\.gif$/i.test(key)) return 'image/gif';
+    return 'image/png';
   }
 }

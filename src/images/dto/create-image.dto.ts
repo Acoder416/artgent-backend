@@ -1,5 +1,14 @@
 import { Type } from 'class-transformer';
-import { IsIn, IsInt, IsOptional, IsString, Max, Min } from 'class-validator';
+import {
+  IsIn,
+  IsInt,
+  IsOptional,
+  IsString,
+  Matches,
+  Max,
+  Min,
+} from 'class-validator';
+import { AI_LINE_ID_PATTERN } from '../ai-line';
 
 export class CreateImageDto {
   @IsString()
@@ -8,6 +17,10 @@ export class CreateImageDto {
   @IsOptional()
   @IsString()
   model = 'gpt-image-2';
+
+  @IsOptional()
+  @Matches(AI_LINE_ID_PATTERN)
+  lineId?: string;
 
   @IsOptional()
   @IsString()
