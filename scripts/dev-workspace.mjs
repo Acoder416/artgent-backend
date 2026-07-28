@@ -1,9 +1,13 @@
 import { spawn } from 'node:child_process';
-import { createConnection } from 'node:net';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { readFileSync } from 'node:fs';
 import { parse } from 'dotenv';
+import {
+  findAvailablePort,
+  isPortOpen,
+  parsePort,
+} from './dev-workspace-ports.mjs';
 
 const backendDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const workspaceDir = resolve(backendDir, '..');
@@ -14,15 +18,15 @@ const backendEnvironment = readEnvironment(
 const frontendEnvironment = readEnvironment(
   resolve(frontendDir, '.env.development'),
 );
-const backendPort = parsePort(
+const requestedBackendPort = parsePort(
   process.env.BACKEND_PORT ||
     process.env.PORT ||
     backendEnvironment.PORT ||
     '3001',
   'backend',
 );
-const frontendPort = parsePort(
-  process.env.FRONTEND_PORT || frontendEnvironment.FRONTEND_PORT || '3016',
+const requestedFrontendPort = parsePort(
+  process.env.FRONTEND_PORT || frontendEnvironment.FRONTEND_PORT || '3000',
   'frontend',
 );
 const npmCli =
@@ -41,34 +45,9 @@ function readEnvironment(file) {
   }
 }
 
-function parsePort(value, label) {
-  const port = Number(value);
-  if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    throw new Error(`Invalid ${label} port: ${value}`);
-  }
-  return port;
-}
-
-function isPortOpen(port) {
-  return new Promise((resolveCheck) => {
-    const socket = createConnection({ port, host: '127.0.0.1' });
-    socket.setTimeout(800);
-    socket.once('connect', () => {
-      socket.destroy();
-      resolveCheck(true);
-    });
-    const unavailable = () => {
-      socket.destroy();
-      resolveCheck(false);
-    };
-    socket.once('timeout', unavailable);
-    socket.once('error', unavailable);
-  });
-}
-
-async function isArtGenBackendRunning() {
+async function isArtGenBackendRunning(port) {
   try {
-    const response = await fetch(`http://127.0.0.1:${backendPort}/api/health`, {
+    const response = await fetch(`http://127.0.0.1:${port}/api/health`, {
       signal: AbortSignal.timeout(1500),
     });
     const body = await response.json();
@@ -96,13 +75,13 @@ function startNpm(args, cwd, environment = {}) {
   return child;
 }
 
-async function waitForBackend(child) {
+async function waitForBackend(child, port) {
   const deadline = Date.now() + 90_000;
   while (Date.now() < deadline) {
     if (child.exitCode !== null) {
       throw new Error(`Backend exited with code ${child.exitCode}`);
     }
-    if (await isArtGenBackendRunning()) return;
+    if (await isArtGenBackendRunning(port)) return;
     await new Promise((resolveWait) => setTimeout(resolveWait, 500));
   }
   throw new Error('Backend did not become healthy within 90 seconds');
@@ -129,24 +108,36 @@ async function shutdown(exitCode = 0) {
 }
 
 async function main() {
+  let backendPort = requestedBackendPort;
+  let backendIsRunning = false;
   if (await isPortOpen(backendPort)) {
-    if (!(await isArtGenBackendRunning())) {
-      throw new Error(
-        `Backend port ${backendPort} is occupied by another program. Stop it or change PORT.`,
+    backendIsRunning = await isArtGenBackendRunning(backendPort);
+    if (backendIsRunning) {
+      console.log(`Reusing ArtGen backend on http://localhost:${backendPort}`);
+    } else {
+      backendPort = await findAvailablePort(requestedBackendPort, {
+        excludedPorts: new Set([requestedFrontendPort]),
+      });
+      console.warn(
+        `Backend port ${requestedBackendPort} is occupied; using ${backendPort}.`,
       );
     }
-    console.log(`Reusing ArtGen backend on http://localhost:${backendPort}`);
-  } else {
+  }
+
+  if (!backendIsRunning) {
     console.log(`Starting ArtGen backend on http://localhost:${backendPort}`);
     const backend = startNpm(['run', backendScript], backendDir, {
       PORT: String(backendPort),
     });
-    await waitForBackend(backend);
+    await waitForBackend(backend, backendPort);
   }
 
-  if (await isPortOpen(frontendPort)) {
-    throw new Error(
-      `Frontend port ${frontendPort} is already in use. Stop the existing frontend or change FRONTEND_PORT.`,
+  const frontendPort = await findAvailablePort(requestedFrontendPort, {
+    excludedPorts: new Set([backendPort]),
+  });
+  if (frontendPort !== requestedFrontendPort) {
+    console.warn(
+      `Frontend port ${requestedFrontendPort} is occupied; using ${frontendPort}.`,
     );
   }
 
@@ -155,7 +146,6 @@ async function main() {
     BACKEND_INTERNAL_URL: `http://127.0.0.1:${backendPort}`,
   });
 }
-
 process.once('SIGINT', () => void shutdown(0));
 process.once('SIGTERM', () => void shutdown(0));
 

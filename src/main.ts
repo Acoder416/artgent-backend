@@ -64,5 +64,5 @@ void bootstrap().catch((error: unknown) => {
   } else {
     console.error('Application failed to start', error);
   }
-  process.exitCode = 1;
+  process.exit(1);
 });

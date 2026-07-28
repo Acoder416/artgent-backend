@@ -9,9 +9,14 @@ npm run dev:workspace
 ```
 
 The launcher reads the backend `PORT` and frontend `FRONTEND_PORT`, reuses a
-healthy ArtGen backend if one is already running, and rejects ports occupied by
-another program. It also passes the resolved backend address to Next.js without
-exposing it to browser code.
+healthy ArtGen backend if one is already running, and passes the resolved backend
+address to Next.js without exposing it to browser code.
+
+The local defaults are frontend `3000` and backend `3001`. If either preferred
+port is occupied, the workspace launcher selects the next available port and
+passes the selected backend address to Next.js. Running `npm run start:dev`
+starts only Nest, keeps the configured backend port fixed, and exits immediately
+when that port is occupied.
 
 ## Same-origin API
 
