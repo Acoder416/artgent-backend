@@ -85,6 +85,12 @@ export class ImagesController {
     return this.imagesService.findByUserId(req.user.id, page, limit);
   }
 
+  @Delete('failed')
+  @UseGuards(JwtAuthGuard)
+  deleteFailed(@Request() req: { user: { id: number } }) {
+    return this.imagesService.deleteFailedImages(req.user.id);
+  }
+
   @Get(':id/download')
   @UseGuards(JwtAuthGuard)
   async download(@Request() req, @Param('id', ParseIntPipe) id: number) {

@@ -226,6 +226,20 @@ export class ImagesService {
     return { images, total };
   }
 
+  async deleteFailedImages(
+    userId: number,
+  ): Promise<{ deletedCount: number; deletedIds: number[] }> {
+    const failedImages = await this.imagesRepository.find({
+      select: { id: true },
+      where: { userId, status: 'failed' },
+    });
+    const deletedIds = failedImages.map((image) => image.id);
+    if (deletedIds.length === 0) return { deletedCount: 0, deletedIds };
+
+    const result = await this.imagesRepository.delete(deletedIds);
+    return { deletedCount: result.affected ?? 0, deletedIds };
+  }
+
   async deleteImage(id: number, userId: number): Promise<void> {
     const image = await this.imagesRepository.findOne({ where: { id } });
     if (!image || image.userId !== userId)
