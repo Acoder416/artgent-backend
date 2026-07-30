@@ -18,6 +18,16 @@ passes the selected backend address to Next.js. Running `npm run start:dev`
 starts only Nest, keeps the configured backend port fixed, and exits immediately
 when that port is occupied.
 
+## Image generation worker
+
+`IMAGE_WORKER_CONCURRENCY` controls how many queued image jobs one backend
+process can execute at the same time. It defaults to `10` and accepts values
+from `1` to `20`:
+
+```env
+IMAGE_WORKER_CONCURRENCY=10
+```
+
 ## Same-origin API
 
 Browser code always calls `/api`. In development, Next.js rewrites that path to

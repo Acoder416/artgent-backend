@@ -59,7 +59,12 @@ export class ImageGenerationWorker
     private readonly usersService: UsersService,
     private readonly configService: ConfigService,
   ) {
-    this.concurrency = this.integerConfig('IMAGE_WORKER_CONCURRENCY', 3, 1, 20);
+    this.concurrency = this.integerConfig(
+      'IMAGE_WORKER_CONCURRENCY',
+      10,
+      1,
+      20,
+    );
     this.pollIntervalMs = this.integerConfig(
       'IMAGE_QUEUE_POLL_INTERVAL_MS',
       2_000,

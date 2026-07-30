@@ -103,6 +103,18 @@ function storedImage(key: string) {
 }
 
 describe('ImageGenerationWorker concurrency', () => {
+  it('uses 10 workers by default', () => {
+    const worker = new ImageGenerationWorker(
+      {} as Repository<Image>,
+      {} as AiService,
+      {} as MinioService,
+      {} as UsersService,
+      new ConfigService(),
+    );
+
+    expect((worker as unknown as { concurrency: number }).concurrency).toBe(10);
+  });
+
   it('never exceeds the configured provider concurrency', async () => {
     const rows = [1, 2, 3, 4, 5].map(pendingImage);
     const repository = {
