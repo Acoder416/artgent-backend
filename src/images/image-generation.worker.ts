@@ -17,20 +17,16 @@ import {
   Repository,
 } from 'typeorm';
 import { UsersService } from '../users/users.service';
-import { MinioService } from '../upload/minio.service';
+import type { ImageFormat } from '../upload/image-format';
+import { MinioService, type StoredImage } from '../upload/minio.service';
 import { AiService } from './ai.service';
 import type { ImageJobInputReference } from './generation-input';
-import { Image } from './image.entity';
+import {
+  DURABLE_IMAGE_JOB_VERSION,
+  Image,
+  LEGACY_IMAGE_JOB_VERSION,
+} from './image.entity';
 import type { ReferenceImage } from './types/uploaded-image-file';
-
-type ImageFormat = 'png' | 'jpeg' | 'webp';
-
-interface StoredImageResult {
-  key: string;
-  url: string;
-  mimeType: string;
-  imageFormat: ImageFormat;
-}
 
 const OUTPUT_FORMATS: ImageFormat[] = ['png', 'jpeg', 'webp'];
 const RETRY_DELAYS_MS = [5_000, 30_000, 120_000];
@@ -182,17 +178,17 @@ export class ImageGenerationWorker
       const now = new Date();
       const where: FindOptionsWhere<Image>[] = [
         {
-          jobVersion: 1,
+          jobVersion: DURABLE_IMAGE_JOB_VERSION,
           status: 'pending',
           availableAt: LessThanOrEqual(now),
         },
         {
-          jobVersion: 1,
+          jobVersion: DURABLE_IMAGE_JOB_VERSION,
           status: 'generating',
           leaseExpiresAt: LessThan(now),
         },
         {
-          jobVersion: 1,
+          jobVersion: DURABLE_IMAGE_JOB_VERSION,
           status: 'generating',
           leaseExpiresAt: IsNull(),
         },
@@ -257,13 +253,13 @@ export class ImageGenerationWorker
       );
       if (!(await this.reserveOutputKey(claimed, outputKey))) return;
 
-      const stored = (await this.minioService.storeImage(
+      const stored = await this.minioService.storeImage(
         result.imageBuffer,
         claimed.userId,
         {
           key: outputKey,
         },
-      )) as StoredImageResult;
+      );
       if (!(await this.completeJob(claimed, stored))) {
         await this.cleanupUnreferencedOutput(claimed.id, stored.key);
       }
@@ -300,13 +296,13 @@ export class ImageGenerationWorker
       existing.status === 'pending'
         ? {
             id: imageId,
-            jobVersion: 1,
+            jobVersion: DURABLE_IMAGE_JOB_VERSION,
             status: 'pending',
             attemptCount: existing.attemptCount,
           }
         : {
             id: imageId,
-            jobVersion: 1,
+            jobVersion: DURABLE_IMAGE_JOB_VERSION,
             status: 'generating',
             attemptCount: existing.attemptCount,
             ...(existing.leaseToken
@@ -335,7 +331,7 @@ export class ImageGenerationWorker
     if (!leaseToken) return;
     try {
       await this.imagesRepository.update(
-        { id: imageId, status: 'generating', leaseToken },
+        this.leaseCriteria(imageId, leaseToken),
         {
           leaseExpiresAt: new Date(Date.now() + this.leaseDurationMs),
         },
@@ -347,6 +343,13 @@ export class ImageGenerationWorker
     }
   }
 
+  private leaseCriteria(
+    imageId: number,
+    leaseToken: string | null,
+  ): FindOptionsWhere<Image> {
+    return { id: imageId, status: 'generating', leaseToken: leaseToken || '' };
+  }
+
   private async reserveOutputKey(
     image: Image,
     imageKey: string,
@@ -356,9 +359,7 @@ export class ImageGenerationWorker
     const previousImageKey = image.imageKey;
     const reserved = await this.imagesRepository.update(
       {
-        id: image.id,
-        status: 'generating',
-        leaseToken: image.leaseToken || '',
+        ...this.leaseCriteria(image.id, image.leaseToken),
         leaseExpiresAt: MoreThan(now),
       },
       { imageKey, leaseExpiresAt },
@@ -378,20 +379,16 @@ export class ImageGenerationWorker
     return true;
   }
 
-  private async findStoredOutput(
-    image: Image,
-  ): Promise<StoredImageResult | null> {
+  private async findStoredOutput(image: Image): Promise<StoredImage | null> {
     if (image.imageKey) {
-      const persisted = (await this.minioService.statImage(
-        image.imageKey,
-      )) as StoredImageResult | null;
+      const persisted = await this.minioService.statImage(image.imageKey);
       if (persisted) return persisted;
     }
 
     for (const format of OUTPUT_FORMATS) {
-      const stored = (await this.minioService.statImage(
+      const stored = await this.minioService.statImage(
         this.legacyOutputKey(image.userId, image.id, format),
-      )) as StoredImageResult | null;
+      );
       if (stored) return stored;
     }
     return null;
@@ -461,14 +458,10 @@ export class ImageGenerationWorker
 
   private async completeJob(
     image: Image,
-    stored: StoredImageResult,
+    stored: StoredImage,
   ): Promise<boolean> {
     const result = await this.imagesRepository.update(
-      {
-        id: image.id,
-        status: 'generating',
-        leaseToken: image.leaseToken || '',
-      },
+      this.leaseCriteria(image.id, image.leaseToken),
       {
         status: 'completed',
         imageUrl: stored.url,
@@ -503,11 +496,7 @@ export class ImageGenerationWorker
           Math.min(image.attemptCount - 1, RETRY_DELAYS_MS.length - 1)
         ];
       await this.imagesRepository.update(
-        {
-          id: image.id,
-          status: 'generating',
-          leaseToken: image.leaseToken || '',
-        },
+        this.leaseCriteria(image.id, image.leaseToken),
         {
           status: 'pending',
           availableAt: new Date(Date.now() + retryDelay),
@@ -520,11 +509,7 @@ export class ImageGenerationWorker
     }
 
     const failed = await this.imagesRepository.update(
-      {
-        id: image.id,
-        status: 'generating',
-        leaseToken: image.leaseToken || '',
-      },
+      this.leaseCriteria(image.id, image.leaseToken),
       {
         status: 'failed',
         errorMessage,
@@ -626,7 +611,7 @@ export class ImageGenerationWorker
   private async reconcileRefunds(): Promise<void> {
     const failedJobs = await this.imagesRepository.find({
       where: {
-        jobVersion: 1,
+        jobVersion: DURABLE_IMAGE_JOB_VERSION,
         status: 'failed',
         refundedAt: IsNull(),
       },
@@ -681,7 +666,7 @@ export class ImageGenerationWorker
     while (!this.stopping) {
       const legacyJobs = await this.imagesRepository.find({
         where: {
-          jobVersion: 0,
+          jobVersion: LEGACY_IMAGE_JOB_VERSION,
           status: 'generating',
         },
         order: { id: 'ASC' },
@@ -694,11 +679,11 @@ export class ImageGenerationWorker
         const failed = await this.imagesRepository.update(
           {
             id: legacyJob.id,
-            jobVersion: 0,
+            jobVersion: LEGACY_IMAGE_JOB_VERSION,
             status: 'generating',
           },
           {
-            jobVersion: 1,
+            jobVersion: DURABLE_IMAGE_JOB_VERSION,
             status: 'failed',
             errorMessage:
               'Generation was interrupted by the queue upgrade; please retry',

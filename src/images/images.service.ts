@@ -15,7 +15,7 @@ import { AiService } from './ai.service';
 import type { AiLineId } from './ai.service';
 import type { ImageJobInputReference } from './generation-input';
 import { ImageGenerationWorker } from './image-generation.worker';
-import { Image } from './image.entity';
+import { DURABLE_IMAGE_JOB_VERSION, Image } from './image.entity';
 import { ReferenceImage } from './types/uploaded-image-file';
 
 export interface GenerateBatchInput {
@@ -105,7 +105,7 @@ export class ImagesService {
           resolution,
           referenceImageUrls,
           inputReferences,
-          jobVersion: 1,
+          jobVersion: DURABLE_IMAGE_JOB_VERSION,
           attemptCount: 0,
           availableAt: new Date(),
           ...dimensions,
@@ -200,7 +200,8 @@ export class ImagesService {
     });
     const deletedIds: number[] = [];
     for (const image of failedImages) {
-      if (image.jobVersion === 1 && !image.refundedAt) continue;
+      if (image.jobVersion === DURABLE_IMAGE_JOB_VERSION && !image.refundedAt)
+        continue;
       try {
         await this.deleteStoredOutput(image);
         deletedIds.push(image.id);
@@ -223,7 +224,7 @@ export class ImagesService {
     }
     if (
       image.status === 'failed' &&
-      image.jobVersion === 1 &&
+      image.jobVersion === DURABLE_IMAGE_JOB_VERSION &&
       !image.refundedAt
     ) {
       throw new ConflictException('Image generation refund is still pending');

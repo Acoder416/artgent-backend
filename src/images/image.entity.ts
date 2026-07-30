@@ -12,6 +12,17 @@ import { User } from '../users/user.entity';
 import { AI_LINE_ID_MAX_LENGTH } from './ai-line';
 import type { ImageJobInputReference } from './generation-input';
 
+export type ImageStatus = 'pending' | 'generating' | 'completed' | 'failed';
+export const LEGACY_IMAGE_JOB_VERSION = 0;
+export const DURABLE_IMAGE_JOB_VERSION = 1;
+
+const IMAGE_STATUS_VALUES: ImageStatus[] = [
+  'pending',
+  'generating',
+  'completed',
+  'failed',
+];
+
 @Entity('images')
 @Index('IDX_images_queue_available', ['status', 'availableAt', 'id'])
 @Index('IDX_images_queue_lease', ['status', 'leaseExpiresAt'])
@@ -68,14 +79,18 @@ export class Image {
 
   @Column({
     type: 'enum',
-    enum: ['pending', 'generating', 'completed', 'failed'],
+    enum: IMAGE_STATUS_VALUES,
     default: 'pending',
   })
-  status: string;
+  status: ImageStatus;
 
   @Column('text', { name: 'error_message', nullable: true })
   errorMessage: string | null;
-  @Column({ type: 'int', name: 'job_version', default: 0 })
+  @Column({
+    type: 'int',
+    name: 'job_version',
+    default: LEGACY_IMAGE_JOB_VERSION,
+  })
   jobVersion: number;
 
   @Column({ type: 'int', name: 'attempt_count', default: 0 })
