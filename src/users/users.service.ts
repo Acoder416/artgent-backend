@@ -7,7 +7,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import * as bcrypt from 'bcryptjs';
-import { DataSource, Repository } from 'typeorm';
+import { DataSource, EntityManager, Repository } from 'typeorm';
 import { MinioService } from '../upload/minio.service';
 import { CreateUserDto } from './dto/create-user.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
@@ -250,6 +250,18 @@ export class UsersService {
     description = '图片生成',
     referenceId?: string,
   ): Promise<User> {
+    if (this.dataSource) {
+      return this.dataSource.transaction((manager) =>
+        this.deductCreditsInTransaction(
+          manager,
+          userId,
+          amount,
+          description,
+          referenceId,
+        ),
+      );
+    }
+
     const user = await this.requireUser(userId);
     if (user.role === 'admin') return user;
     if (user.credits < amount) throw new ConflictException('积分不足');
@@ -262,6 +274,38 @@ export class UsersService {
       -amount,
       description,
       referenceId,
+    );
+    return saved;
+  }
+
+  async deductCreditsInTransaction(
+    manager: EntityManager,
+    userId: number,
+    amount = 1,
+    description = '图片生成',
+    referenceId?: string,
+  ): Promise<User> {
+    const user = await manager.findOne(User, {
+      where: { id: userId },
+      lock: { mode: 'pessimistic_write' },
+    });
+    if (!user) throw new NotFoundException('用户不存在');
+    if (user.role === 'admin') return user;
+    if (user.credits < amount) throw new ConflictException('积分不足');
+
+    user.credits -= amount;
+    user.totalCreditsSpent = (user.totalCreditsSpent || 0) + amount;
+    const saved = await manager.save(User, user);
+    await manager.save(
+      CreditTransaction,
+      manager.create(CreditTransaction, {
+        userId,
+        type: 'generation',
+        amount: -amount,
+        balanceAfter: saved.credits,
+        description,
+        referenceId: referenceId || null,
+      }),
     );
     return saved;
   }
@@ -289,6 +333,61 @@ export class UsersService {
     return saved;
   }
 
+  async refundCreditsOnce(
+    userId: number,
+    amount: number,
+    referenceId: string,
+    description = 'Image generation failed refund',
+  ): Promise<User> {
+    if (!this.dataSource) {
+      if (this.creditsRepository) {
+        const existing = await this.creditsRepository.findOne({
+          where: { userId, type: 'refund', referenceId },
+        });
+        if (existing) return this.requireUser(userId);
+      }
+      return this.addCredits(
+        userId,
+        amount,
+        'refund',
+        description,
+        referenceId,
+      );
+    }
+
+    return this.dataSource.transaction(async (manager) => {
+      const user = await manager.findOne(User, {
+        where: { id: userId },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!user) throw new NotFoundException('User does not exist');
+      if (user.role === 'admin') return user;
+
+      const existing = await manager.findOne(CreditTransaction, {
+        where: { userId, type: 'refund', referenceId },
+      });
+      if (existing) return user;
+
+      user.credits += amount;
+      user.totalCreditsSpent = Math.max(
+        0,
+        (user.totalCreditsSpent || 0) - amount,
+      );
+      const saved = await manager.save(User, user);
+      await manager.save(
+        CreditTransaction,
+        manager.create(CreditTransaction, {
+          userId,
+          type: 'refund',
+          amount,
+          balanceAfter: saved.credits,
+          description,
+          referenceId,
+        }),
+      );
+      return saved;
+    });
+  }
   async checkIn(userId: number, now = new Date()): Promise<CheckInResult> {
     if (!this.dataSource) throw new Error('Database is unavailable');
     return this.dataSource.transaction(async (manager) => {

@@ -46,13 +46,27 @@ describe('DELETE /api/images/failed', () => {
       id: number,
       userId: number,
       status: Image['status'],
-    ): Image => Object.assign(new Image(), { id, userId, status });
+    ): Image =>
+      Object.assign(new Image(), {
+        id,
+        userId,
+        status,
+        jobVersion: 1,
+        refundedAt: status === 'failed' ? new Date() : null,
+      });
+    const unrefunded = image(5, 7, 'failed');
+    unrefunded.refundedAt = null;
+    const legacyFailure = image(6, 7, 'failed');
+    legacyFailure.jobVersion = 0;
+    legacyFailure.refundedAt = null;
     const service = new ImagesService(
       createImageRepository([
         image(1, 7, 'failed'),
         image(2, 7, 'completed'),
         image(3, 7, 'generating'),
         image(4, 8, 'failed'),
+        unrefunded,
+        legacyFailure,
       ]),
       {} as UsersService,
       {} as AiService,
@@ -112,9 +126,9 @@ describe('DELETE /api/images/failed', () => {
     }).toEqual({
       deletion: {
         status: 200,
-        body: { deletedCount: 1, deletedIds: [1] },
+        body: { deletedCount: 2, deletedIds: [1, 6] },
       },
-      ownerImageIds: [2, 3],
+      ownerImageIds: [2, 3, 5],
       otherImageIds: [4],
     });
   });

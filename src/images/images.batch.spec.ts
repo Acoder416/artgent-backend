@@ -23,12 +23,14 @@ describe('ImagesService batch generation', () => {
     const rows: Image[] = [];
     const imageRepository = {
       create: (input: Partial<Image>) => Object.assign(new Image(), input),
-      save: (image: Image) => {
-        if (!image.id) {
-          image.id = rows.length + 1;
-          rows.push(image);
+      save: (images: Image[]) => {
+        for (const image of images) {
+          if (!image.id) {
+            image.id = rows.length + 1;
+            rows.push(image);
+          }
         }
-        return Promise.resolve(image);
+        return Promise.resolve(images);
       },
       findOne: ({ where }: { where: Partial<Image> }) =>
         Promise.resolve(rows.find((item) => item.id === where.id) || null),
@@ -56,8 +58,8 @@ describe('ImagesService batch generation', () => {
     expect(result.images).toHaveLength(3);
     expect(new Set(result.images.map((item) => item.requestId)).size).toBe(1);
     expect(result.images[0]).toMatchObject({
-      status: 'generating',
-      width: 1638,
+      status: 'pending',
+      width: 1632,
       height: 2048,
       aspectRatio: '4:5',
       resolution: '2K',

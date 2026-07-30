@@ -11,6 +11,7 @@ describe('ImagesService downloads', () => {
     id: 42,
     userId: 7,
     imageUrl: 'https://static.example.com/images/7/result.png',
+    imageKey: null,
   });
   const repository = {
     findOne: jest.fn().mockResolvedValue(image),
@@ -21,11 +22,17 @@ describe('ImagesService downloads', () => {
     size: 128,
     contentType: 'image/png',
   });
+  const openImageByKey = jest.fn().mockResolvedValue({
+    stream: {},
+    key: 'images/7/42.webp',
+    size: 256,
+    contentType: 'image/webp',
+  });
   const service = new ImagesService(
     repository,
     {} as UsersService,
     {} as AiService,
-    { openImageByUrl } as unknown as MinioService,
+    { openImageByKey, openImageByUrl } as unknown as MinioService,
   );
 
   beforeEach(() => jest.clearAllMocks());
@@ -38,9 +45,26 @@ describe('ImagesService downloads', () => {
     });
     expect(openImageByUrl).toHaveBeenCalledWith(image.imageUrl);
   });
+  it('uses the stable object key when one is available', async () => {
+    image.imageKey = 'images/7/42.webp';
+    image.imageFormat = 'webp';
+
+    await expect(service.getDownload(42, 7)).resolves.toMatchObject({
+      filename: 'cadriva-42.webp',
+      size: 256,
+      contentType: 'image/webp',
+    });
+    expect(openImageByKey).toHaveBeenCalledWith(image.imageKey);
+    expect(openImageByUrl).not.toHaveBeenCalled();
+
+    image.imageKey = null;
+    image.imageFormat = null;
+  });
 
   it('does not expose another user image', async () => {
-    await expect(service.getDownload(42, 8)).rejects.toBeInstanceOf(NotFoundException);
+    await expect(service.getDownload(42, 8)).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
     expect(openImageByUrl).not.toHaveBeenCalled();
   });
 });

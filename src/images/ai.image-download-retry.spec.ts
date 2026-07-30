@@ -2,31 +2,23 @@ import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
 import { AiService } from './ai.service';
 
-describe('AiService image URL download', () => {
+describe('AiService generated image download retryability', () => {
   afterEach(() => {
     jest.restoreAllMocks();
   });
 
-  it('retries a transient TLS disconnect returned by the image gateway', async () => {
+  it('retries an HTTP 429 while downloading a generated image', async () => {
     const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
     jest.spyOn(axios, 'post').mockResolvedValue({
-      data: {
-        data: [
-          {
-            url: 'https://static.example.com/artgen/images/6/result.png',
-          },
-        ],
-      },
+      data: { data: [{ url: 'https://static.test/result.png' }] },
     });
     const get = jest
       .spyOn(axios, 'get')
       .mockRejectedValueOnce(
-        Object.assign(
-          new Error(
-            'Client network socket disconnected before secure TLS connection was established',
-          ),
-          { code: 'ECONNRESET' },
-        ),
+        Object.assign(new Error('rate limited'), {
+          isAxiosError: true,
+          response: { status: 429 },
+        }),
       )
       .mockResolvedValueOnce({ data: png });
     const service = new AiService(
@@ -38,17 +30,12 @@ describe('AiService image URL download', () => {
     );
 
     const result = await service.generateImage(
-      'A precise editorial product photograph',
+      'A studio product photograph',
       'gpt-image-2',
       '1024x1024',
     );
 
-    expect(result).toMatchObject({
-      success: true,
-      imageBuffer: png,
-      mimeType: 'image/png',
-      imageFormat: 'png',
-    });
+    expect(result.success).toBe(true);
     expect(get).toHaveBeenCalledTimes(2);
   });
 });

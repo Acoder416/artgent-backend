@@ -26,12 +26,14 @@ function createImageRepository(): Repository<Image> {
 
   return {
     create: (input: Partial<Image>) => Object.assign(new Image(), input),
-    save: (image: Image) => {
-      if (!image.id) {
-        image.id = images.length + 1;
-        images.push(image);
+    save: (candidates: Image[]) => {
+      for (const image of candidates) {
+        if (!image.id) {
+          image.id = images.length + 1;
+          images.push(image);
+        }
       }
-      return Promise.resolve(image);
+      return Promise.resolve(candidates);
     },
     findOne: ({ where }: { where: Partial<Image> }) =>
       Promise.resolve(
@@ -70,7 +72,7 @@ describe('ImagesService administrator credits', () => {
     const image = await service.generate(1, 'Create an abstract landscape');
     const profile = await usersService.getProfile(1);
 
-    expect(image.status).toBe('generating');
+    expect(image.status).toBe('pending');
     expect(profile.credits).toBe(0);
   });
 });

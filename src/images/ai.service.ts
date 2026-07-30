@@ -7,15 +7,31 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
+import {
+  detectImageMetadata,
+  ImageFormat,
+  ImageMimeType,
+} from '../upload/image-format';
 import type { AiLineId } from './ai-line';
 import { AiLineConnection, loadAiLinesConfiguration } from './ai-lines.config';
 import { ReferenceImage, UploadedImageFile } from './types/uploaded-image-file';
 
-export interface GenerateImageResult {
-  success: boolean;
-  imageBuffer?: Buffer;
-  error?: string;
-}
+export type GenerateImageResult =
+  | {
+      success: true;
+      imageBuffer: Buffer;
+      mimeType: ImageMimeType;
+      imageFormat: ImageFormat;
+      error?: never;
+    }
+  | {
+      success: false;
+      error: string;
+      retryable: boolean;
+      imageBuffer?: never;
+      mimeType?: never;
+      imageFormat?: never;
+    };
 
 export type { AiLineId } from './ai-line';
 
@@ -129,8 +145,9 @@ export class AiService {
         .filter((id) => fallbackImageModels.includes(id));
 
       return models.length > 0 ? models : fallbackImageModels;
-    } catch (error) {
-      this.logger.warn(`Failed to fetch image models: ${error.message}`);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`Failed to fetch image models: ${message}`);
       return fallbackImageModels;
     }
   }
@@ -142,24 +159,25 @@ export class AiService {
     referenceImage?: ReferenceImage,
     lineId?: AiLineId,
   ): Promise<GenerateImageResult> {
-    const connection = this.resolveConnection(lineId);
     const referenceCount =
       (referenceImage?.files?.length || 0) +
       (referenceImage?.urls?.length || 0) +
       (referenceImage?.file ? 1 : 0) +
       (referenceImage?.url ? 1 : 0);
 
-    this.logger.log(
-      `Generating image: line=${connection.id}, model=${model}, size=${size}, mode=${
-        referenceCount > 0 ? 'edit' : 'generation'
-      }, prompt="${prompt.slice(0, 50)}..."`,
-    );
-
     try {
+      const connection = this.resolveConnection(lineId);
+      this.logger.log(
+        `Generating image: line=${connection.id}, model=${model}, size=${size}, mode=${
+          referenceCount > 0 ? 'edit' : 'generation'
+        }, prompt="${prompt.slice(0, 50)}..."`,
+      );
+
       if (!connection.apiKey) {
         return {
           success: false,
           error: 'Sub2API key is not configured',
+          retryable: false,
         };
       }
 
@@ -175,14 +193,13 @@ export class AiService {
           : await this.createImage(prompt, model, size, connection);
 
       return await this.extractImageBuffer(response.data);
-    } catch (error) {
-      this.logger.error(`Image generation failed: ${error.message}`);
+    } catch (error: unknown) {
+      const message = this.generationErrorMessage(error);
+      this.logger.error(`Image generation failed: ${message}`);
       return {
         success: false,
-        error:
-          error.response?.data?.error?.message ||
-          error.message ||
-          'Image generation failed',
+        error: message,
+        retryable: this.isRetryableProviderError(error),
       };
     }
   }
@@ -238,7 +255,7 @@ export class AiService {
       return prompt.slice(0, 2000);
     } catch (error: unknown) {
       if (error instanceof BadGatewayException) throw error;
-      const message = axios.isAxiosError(error)
+      const message = axios.isAxiosError<OpenAIChatResponse>(error)
         ? error.response?.data?.error?.message || error.message
         : error instanceof Error
           ? error.message
@@ -360,25 +377,38 @@ export class AiService {
   ): Promise<GenerateImageResult> {
     const image = response.data?.[0];
     if (image?.b64_json) {
-      return {
-        success: true,
-        imageBuffer: Buffer.from(image.b64_json, 'base64'),
-      };
+      return this.createGeneratedImageResult(
+        Buffer.from(image.b64_json, 'base64'),
+      );
     }
 
     if (image?.url) {
       const imageResponse = await this.downloadGeneratedImage(image.url);
-
-      return {
-        success: true,
-        imageBuffer: Buffer.from(imageResponse.data),
-      };
+      return this.createGeneratedImageResult(Buffer.from(imageResponse.data));
     }
 
     return {
       success: false,
       error:
         response.error?.message || 'Image generation API returned no image',
+      retryable: false,
+    };
+  }
+
+  private createGeneratedImageResult(imageBuffer: Buffer): GenerateImageResult {
+    const metadata = detectImageMetadata(imageBuffer);
+    if (!metadata) {
+      return {
+        success: false,
+        error: 'Image generation API returned an unsupported image format',
+        retryable: false,
+      };
+    }
+
+    return {
+      success: true,
+      imageBuffer,
+      ...metadata,
     };
   }
 
@@ -401,7 +431,7 @@ export class AiService {
           timeout: 120000,
         });
       } catch (error: unknown) {
-        if (attempt === attempts || !this.isTransientNetworkError(error)) {
+        if (attempt === attempts || !this.isRetryableProviderError(error)) {
           throw error;
         }
 
@@ -416,24 +446,45 @@ export class AiService {
     throw new Error('Generated image download failed');
   }
 
-  private isTransientNetworkError(error: unknown): boolean {
+  private isRetryableProviderError(error: unknown): boolean {
     const code =
       typeof error === 'object' && error && 'code' in error
-        ? String(error.code)
+        ? String(error.code).toUpperCase()
         : '';
     const status = axios.isAxiosError(error)
       ? error.response?.status
       : undefined;
 
-    return (
-      [
-        'ECONNRESET',
-        'ETIMEDOUT',
-        'ECONNABORTED',
-        'EPIPE',
-        'EAI_AGAIN',
-      ].includes(code) ||
-      (status !== undefined && status >= 500)
-    );
+    if (status !== undefined) {
+      return (
+        status === 408 || status === 429 || (status >= 500 && status < 600)
+      );
+    }
+
+    return [
+      'ECONNRESET',
+      'ETIMEDOUT',
+      'ECONNABORTED',
+      'ECONNREFUSED',
+      'EHOSTUNREACH',
+      'ENETUNREACH',
+      'ENOTFOUND',
+      'EPIPE',
+      'EAI_AGAIN',
+      'ERR_NETWORK',
+    ].includes(code);
+  }
+
+  private generationErrorMessage(error: unknown): string {
+    if (axios.isAxiosError<OpenAIImageResponse>(error)) {
+      return (
+        error.response?.data?.error?.message ||
+        error.message ||
+        'Image generation failed'
+      );
+    }
+    if (error instanceof Error && error.message) return error.message;
+    if (typeof error === 'string' && error) return error;
+    return 'Image generation failed';
   }
 }

@@ -1,7 +1,35 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { randomUUID } from 'node:crypto';
+import { Readable } from 'node:stream';
 import * as Minio from 'minio';
-import { randomUUID } from 'crypto';
+import {
+  detectImageMetadata,
+  ImageFormat,
+  ImageMetadata,
+  ImageMimeType,
+} from './image-format';
+
+export interface StoreImageOptions {
+  key?: string;
+  folder?: string;
+}
+
+export interface StoredImage {
+  key: string;
+  url: string;
+  mimeType: ImageMimeType;
+  imageFormat: ImageFormat;
+}
+
+export interface StoredImageObject extends StoredImage {
+  size: number;
+}
+
+export interface OpenedStoredImage extends StoredImageObject {
+  stream: Readable;
+  contentType: ImageMimeType;
+}
 
 @Injectable()
 export class MinioService implements OnModuleInit {
@@ -26,65 +54,147 @@ export class MinioService implements OnModuleInit {
     this.logger.log('MinIO client initialized');
   }
 
-  /**
-   * 上传图片Buffer到MinIO
-   * @param imageBuffer 图片数据
-   * @param userId 用户ID
-   * @param ext 文件扩展名 (png/jpg)
-   * @returns 公开访问URL
-   */
-  async uploadImage(
+  async storeImage(
     imageBuffer: Buffer,
     userId: number,
-    ext: string = 'png',
-  ): Promise<string> {
-    const key = `images/${userId}/${Date.now()}-${randomUUID().slice(0, 8)}.${ext}`;
+    options: StoreImageOptions = {},
+  ): Promise<StoredImage> {
+    const metadata = detectImageMetadata(imageBuffer);
+    if (!metadata) throw new Error('Unsupported image format');
+
+    const key = options.key
+      ? this.validateObjectKey(options.key)
+      : this.createObjectKey(userId, options.folder || 'images', metadata);
 
     await this.minioClient.putObject(
       this.bucket,
       key,
       imageBuffer,
       imageBuffer.length,
-      {
-        'Content-Type':
-          ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : `image/${ext}`,
-      },
+      { 'Content-Type': metadata.mimeType },
     );
 
-    const url = `${this.publicUrl}/${key}`;
     this.logger.log(`Image uploaded: ${key}`);
-    return url;
+    return {
+      key,
+      url: this.urlForKey(key),
+      ...metadata,
+    };
   }
 
-  async openImageByUrl(imageUrl: string) {
-    const key = this.getImageKey(imageUrl);
-    if (!key) throw new Error('Unsupported image URL');
-
-    const stat = await this.minioClient.statObject(this.bucket, key);
-    const stream = await this.minioClient.getObject(this.bucket, key);
-    const contentType = stat.metaData?.['content-type'] || this.contentTypeForKey(key);
-    return { stream, key, size: stat.size, contentType };
+  async uploadImage(
+    imageBuffer: Buffer,
+    userId: number,
+    ext: string = 'png',
+  ): Promise<string> {
+    void ext;
+    return (await this.storeImage(imageBuffer, userId)).url;
   }
 
-  async deleteImageByUrl(imageUrl: string): Promise<void> {
-    const key = this.getImageKey(imageUrl);
-    if (!key) return;
+  async readImage(key: string): Promise<Buffer> {
+    const stream = await this.minioClient.getObject(
+      this.bucket,
+      this.validateObjectKey(key),
+    );
+    const chunks: Buffer[] = [];
+    for await (const chunk of stream as AsyncIterable<Uint8Array | string>) {
+      chunks.push(Buffer.from(chunk));
+    }
+    return Buffer.concat(chunks);
+  }
 
+  async statImage(key: string): Promise<StoredImageObject | null> {
+    const safeKey = this.validateObjectKey(key);
     try {
-      await this.deleteImage(key);
+      const stat = await this.minioClient.statObject(this.bucket, safeKey);
+      const metadata = this.metadataForStoredObject(safeKey, stat.metaData);
+      if (!metadata) {
+        throw new Error(`Unsupported stored image format: ${safeKey}`);
+      }
+      return {
+        key: safeKey,
+        url: this.urlForKey(safeKey),
+        size: stat.size,
+        ...metadata,
+      };
     } catch (error: unknown) {
-      const message = error instanceof Error ? error.message : String(error);
-      this.logger.warn(`Unable to delete image ${key}: ${message}`);
+      if (this.isMissingObject(error)) return null;
+      throw error;
     }
   }
 
-  /**
-   * 删除MinIO上的图片
-   * @param key 文件key
-   */
+  async openImageByKey(key: string): Promise<OpenedStoredImage> {
+    const stored = await this.statImage(key);
+    if (!stored) throw new Error('Image not found');
+
+    const stream = await this.minioClient.getObject(this.bucket, stored.key);
+    return {
+      ...stored,
+      stream,
+      contentType: stored.mimeType,
+    };
+  }
+
+  async openImageByUrl(imageUrl: string): Promise<OpenedStoredImage> {
+    const key = this.getImageKey(imageUrl);
+    if (!key) throw new Error('Unsupported image URL');
+    return this.openImageByKey(key);
+  }
+
+  async deleteImageByUrl(imageUrl: string): Promise<void> {
+    try {
+      await this.deleteImageByUrlStrict(imageUrl);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`Unable to delete image by URL: ${message}`);
+    }
+  }
+
+  async deleteImageByUrlStrict(imageUrl: string): Promise<void> {
+    const key = this.getImageKey(imageUrl);
+    if (!key) throw new Error('Unsupported image URL');
+    await this.deleteImage(key);
+  }
+
   async deleteImage(key: string): Promise<void> {
-    await this.minioClient.removeObject(this.bucket, key);
-    this.logger.log(`Image deleted: ${key}`);
+    const safeKey = this.validateObjectKey(key);
+    await this.minioClient.removeObject(this.bucket, safeKey);
+    this.logger.log(`Image deleted: ${safeKey}`);
+  }
+
+  private createObjectKey(
+    userId: number,
+    folder: string,
+    metadata: ImageMetadata,
+  ): string {
+    const safeFolder = this.validateObjectKey(`${folder}/placeholder`).slice(
+      0,
+      -'/placeholder'.length,
+    );
+    const extension =
+      metadata.imageFormat === 'jpeg' ? 'jpg' : metadata.imageFormat;
+    return `${safeFolder}/${userId}/${Date.now()}-${randomUUID().slice(0, 8)}.${extension}`;
+  }
+
+  private validateObjectKey(key: string): string {
+    const segments = key.split('/');
+    if (
+      !key ||
+      key.startsWith('/') ||
+      key.endsWith('/') ||
+      key.includes('\\') ||
+      segments.some(
+        (segment) => !segment || segment === '.' || segment === '..',
+      )
+    ) {
+      throw new Error('Invalid image object key');
+    }
+    return key;
+  }
+
+  private urlForKey(key: string): string {
+    const publicUrl = this.publicUrl.replace(/\/+$/, '');
+    return publicUrl ? `${publicUrl}/${key}` : `/${key}`;
   }
 
   private getImageKey(imageUrl: string): string | null {
@@ -95,10 +205,51 @@ export class MinioService implements OnModuleInit {
     return key.startsWith('images/') ? key : null;
   }
 
-  private contentTypeForKey(key: string): string {
-    if (/\.jpe?g$/i.test(key)) return 'image/jpeg';
-    if (/\.webp$/i.test(key)) return 'image/webp';
-    if (/\.gif$/i.test(key)) return 'image/gif';
-    return 'image/png';
+  private metadataForStoredObject(
+    key: string,
+    objectMetadata?: Record<string, unknown>,
+  ): ImageMetadata | null {
+    const contentTypeEntry = Object.entries(objectMetadata || {}).find(
+      ([name]) => name.toLowerCase() === 'content-type',
+    );
+    const contentType = contentTypeEntry
+      ? String(contentTypeEntry[1]).split(';', 1)[0].trim().toLowerCase()
+      : '';
+
+    if (contentType === 'image/png') {
+      return { mimeType: 'image/png', imageFormat: 'png' };
+    }
+    if (contentType === 'image/jpeg') {
+      return { mimeType: 'image/jpeg', imageFormat: 'jpeg' };
+    }
+    if (contentType === 'image/webp') {
+      return { mimeType: 'image/webp', imageFormat: 'webp' };
+    }
+    if (/\.png$/i.test(key)) {
+      return { mimeType: 'image/png', imageFormat: 'png' };
+    }
+    if (/\.jpe?g$/i.test(key)) {
+      return { mimeType: 'image/jpeg', imageFormat: 'jpeg' };
+    }
+    if (/\.webp$/i.test(key)) {
+      return { mimeType: 'image/webp', imageFormat: 'webp' };
+    }
+    return null;
+  }
+
+  private isMissingObject(error: unknown): boolean {
+    if (!error || typeof error !== 'object') return false;
+    const candidate = error as {
+      code?: string;
+      statusCode?: number;
+      response?: { statusCode?: number };
+    };
+    return (
+      ['NoSuchKey', 'NoSuchObject', 'NotFound'].includes(
+        candidate.code || '',
+      ) ||
+      candidate.statusCode === 404 ||
+      candidate.response?.statusCode === 404
+    );
   }
 }

@@ -34,6 +34,7 @@ async function bootstrap() {
   // Load AppModule only after the selected environment is fully initialized.
   const { AppModule } = await import('./app.module.js');
   const app = await NestFactory.create(AppModule);
+  app.enableShutdownHooks();
   const configService = app.get(ConfigService);
   const usersService = app.get(UsersService);
 

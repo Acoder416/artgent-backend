@@ -8,9 +8,10 @@ describe('AiService line routing', () => {
   });
 
   it('uses the selected line URL and credentials for generation', async () => {
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
     const post = jest.spyOn(axios, 'post').mockResolvedValue({
       data: {
-        data: [{ b64_json: Buffer.from('image').toString('base64') }],
+        data: [{ b64_json: png.toString('base64') }],
       },
     });
     const service = new AiService(
@@ -31,14 +32,11 @@ describe('AiService line routing', () => {
     );
 
     expect(result.success).toBe(true);
-    expect(post).toHaveBeenCalledWith(
-      'https://line-b.test/v1/images/generations',
-      expect.any(Object),
-      expect.objectContaining({
-        headers: expect.objectContaining({
-          Authorization: 'Bearer line-b-key',
-        }),
-      }),
-    );
+    expect(post).toHaveBeenCalledTimes(1);
+    const [url, , requestConfig] = post.mock.calls[0];
+    expect(url).toBe('https://line-b.test/v1/images/generations');
+    expect(requestConfig?.headers).toMatchObject({
+      Authorization: 'Bearer line-b-key',
+    });
   });
 });

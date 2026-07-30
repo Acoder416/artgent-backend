@@ -26,5 +26,21 @@ describe('MySQL entity metadata', () => {
       .getMetadata(Image)
       .findColumnWithPropertyName('lineId');
     expect(lineIdColumn?.length).toBe('64');
+    const imageMetadata = dataSource.getMetadata(Image);
+    expect(
+      [
+        'inputReferences',
+        'attemptCount',
+        'availableAt',
+        'leaseToken',
+        'leaseExpiresAt',
+        'mimeType',
+        'imageFormat',
+      ].every((property) =>
+        imageMetadata.columns.some(
+          (column) => column.propertyName === property,
+        ),
+      ),
+    ).toBe(true);
   });
 });
