@@ -35,13 +35,13 @@ $ npm install
 
 ```bash
 # development
-$ npm run start
+$ npm run dev
 
-# watch mode
-$ npm run start:dev
+# build
+$ npm run build
 
 # production mode
-$ npm run start:prod
+$ npm run prod
 ```
 
 ## Run tests

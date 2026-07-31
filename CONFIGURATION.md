@@ -1,22 +1,36 @@
 # ArtGen runtime configuration
 
-## Local development
+## Development
 
-From `artgen-backend`, run:
+Start the backend from `artgen-backend`:
 
 ```powershell
-npm run dev:workspace
+npm run dev
 ```
 
-The launcher reads the backend `PORT` and frontend `FRONTEND_PORT`, reuses a
-healthy ArtGen backend if one is already running, and passes the resolved backend
-address to Next.js without exposing it to browser code.
+Then start the frontend from `artgen-frontend`:
 
-The local defaults are frontend `3000` and backend `3001`. If either preferred
-port is occupied, the workspace launcher selects the next available port and
-passes the selected backend address to Next.js. Running `npm run start:dev`
-starts only Nest, keeps the configured backend port fixed, and exits immediately
-when that port is occupied.
+```powershell
+npm run dev
+```
+
+The backend treats `PORT` from `.env.development` as its preferred port and
+defaults to `3001`. If that port is occupied, it automatically tries the next
+port until it finds one that is available. The selected URL is published to a
+git-ignored runtime descriptor in `artgen-backend/.artgen-dev/backend.json`.
+
+The frontend waits for that descriptor and for the backend health check, then
+starts Next.js with the selected backend URL. Browser requests continue to use
+the same-origin `/api/*` path; no frontend source configuration changes when
+the backend moves from `3001` to `3002` or another port.
+
+Set `BACKEND_INTERNAL_URL` in the frontend process environment or its
+`.env.development` file only when you need to override automatic development
+discovery.
+
+Next.js resolves its rewrite destination when the frontend starts. If the
+backend is later restarted on a different port, restart the frontend with
+`npm run dev` so it reads the new runtime URL.
 
 ## Image generation worker
 
@@ -27,6 +41,20 @@ from `1` to `20`:
 ```env
 IMAGE_WORKER_CONCURRENCY=10
 ```
+
+## Production
+
+Build each service before starting it in production mode:
+
+```powershell
+npm run build
+npm run prod
+```
+
+The backend loads `.env.production`. The frontend must receive
+`BACKEND_INTERNAL_URL` when it is built, or `/api/*` must be routed to Nest by
+the public reverse proxy. Development port discovery is not used in
+production.
 
 ## Same-origin API
 

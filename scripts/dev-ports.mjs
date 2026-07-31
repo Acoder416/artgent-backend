@@ -25,16 +25,12 @@ export function isPortOpen(port) {
   });
 }
 
-export async function findAvailablePort(startPort, options = {}) {
-  const firstPort = parsePort(startPort, 'starting');
-  const excludedPorts = options.excludedPorts ?? new Set();
-  const checkPortOpen = options.isPortOpen ?? isPortOpen;
+export async function findAvailablePort(startingPort, options = {}) {
+  const checkPort = options.isPortOpen ?? isPortOpen;
 
-  for (let port = firstPort; port <= 65535; port += 1) {
-    if (!excludedPorts.has(port) && !(await checkPortOpen(port))) {
-      return port;
-    }
+  for (let port = startingPort; port <= 65535; port += 1) {
+    if (!(await checkPort(port))) return port;
   }
 
-  throw new Error(`No available port found at or above ${firstPort}`);
+  throw new Error(`No available port found from ${startingPort} to 65535.`);
 }

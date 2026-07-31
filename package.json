@@ -9,17 +9,17 @@
     "build": "nest build",
     "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
     "start": "nest start",
-    "start:dev": "node scripts/check-backend-port.mjs && nest start --watch",
-    "dev:workspace": "node scripts/dev-workspace.mjs",
     "start:debug": "nest start --debug --watch",
-    "start:prod": "node dist/main --env=production",
     "lint": "eslint \"{src,apps,libs,test}/**/*.ts\" --fix",
+    "pretest": "npm run test:dev",
     "test": "jest",
+    "test:dev": "node --test scripts/*.spec.mjs",
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage",
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "jest --config ./test/jest-e2e.json",
-    "test:workspace": "node --test scripts/dev-workspace-ports.spec.mjs"
+    "dev": "node scripts/dev.mjs",
+    "prod": "node dist/main --env=production"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.1",
