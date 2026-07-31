@@ -37,6 +37,16 @@ function pendingImage(id: number): Image {
 interface WorkerInternals {
   processJob(imageId: number): Promise<void>;
   scanForWork(): Promise<void>;
+  loadReferenceImage(
+    references: NonNullable<Image['inputReferences']>,
+  ): Promise<{
+    files?: Array<{
+      buffer: Buffer;
+      mimetype?: string;
+      originalname?: string;
+    }>;
+    urls?: string[];
+  }>;
   cleanupInputObjectsAfterTerminal(image: Image): Promise<void>;
   reconcileInputCleanup(): Promise<void>;
 }
@@ -321,6 +331,42 @@ describe('ImageGenerationWorker concurrency', () => {
       row.lineId,
     );
     await worker.onApplicationShutdown();
+  });
+
+  it('restores a legacy URL reference from MinIO as an uploaded file', async () => {
+    const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+    const sourceUrl =
+      'https://static.example.com/artgen/images/7/legacy-reference.png';
+    const readImageByUrl = jest.fn().mockResolvedValue({
+      key: 'images/7/legacy-reference.png',
+      url: sourceUrl,
+      size: png.length,
+      mimeType: 'image/png',
+      imageFormat: 'png',
+      buffer: png,
+    });
+    const worker = new ImageGenerationWorker(
+      {} as Repository<Image>,
+      {} as AiService,
+      { readImageByUrl } as unknown as MinioService,
+      {} as UsersService,
+      new ConfigService(),
+    );
+
+    const referenceImage = await internals(worker).loadReferenceImage([
+      { kind: 'url', url: sourceUrl },
+    ]);
+
+    expect(readImageByUrl).toHaveBeenCalledWith(sourceUrl);
+    expect(referenceImage).toEqual({
+      files: [
+        {
+          buffer: png,
+          mimetype: 'image/png',
+          originalname: 'legacy-reference.png',
+        },
+      ],
+    });
   });
 
   it('does not upload after losing the lease while reserving the output key', async () => {

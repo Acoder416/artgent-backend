@@ -192,7 +192,7 @@ export class AiService {
             )
           : await this.createImage(prompt, model, size, connection);
 
-      return await this.extractImageBuffer(response.data);
+      return await this.extractImageBuffer(response.data, connection);
     } catch (error: unknown) {
       const message = this.generationErrorMessage(error);
       this.logger.error(`Image generation failed: ${message}`);
@@ -297,18 +297,6 @@ export class AiService {
     referenceImage: ReferenceImage,
     connection: AiLineConnection,
   ) {
-    const body: Record<string, unknown> = {
-      model,
-      prompt,
-      n: 1,
-      size,
-      response_format: 'b64_json',
-    };
-    let data: FormData | Record<string, unknown> = body;
-    let headers: Record<string, string> = {
-      Authorization: `Bearer ${connection.apiKey}`,
-      'Content-Type': 'application/json',
-    };
     const files = [
       ...(referenceImage.files || []),
       ...(referenceImage.file ? [referenceImage.file] : []),
@@ -318,38 +306,36 @@ export class AiService {
       ...(referenceImage.url ? [referenceImage.url] : []),
     ].filter(Boolean);
 
-    if (files.length > 0 && urls.length === 0) {
-      const formData = new FormData();
-      formData.append('model', model);
-      formData.append('prompt', prompt);
-      formData.append('n', '1');
-      formData.append('size', size);
-      formData.append('response_format', 'b64_json');
-
-      files.forEach((file, index) => {
-        formData.append(
-          'image',
-          this.fileToBlob(file),
-          file.originalname || `reference-${index + 1}.png`,
-        );
-      });
-
-      data = formData;
-      headers = {
-        Authorization: `Bearer ${connection.apiKey}`,
-      };
-    } else {
-      body.images = [
-        ...urls.map((url) => ({ image_url: url })),
-        ...files.map((file) => ({ image_url: this.fileToDataUrl(file) })),
-      ];
+    if (urls.length > 0) {
+      throw new BadRequestException(
+        'Reference image URLs must be staged as files',
+      );
     }
+    if (files.length === 0) {
+      throw new BadRequestException('At least one reference image is required');
+    }
+
+    const formData = new FormData();
+    formData.append('model', model);
+    formData.append('prompt', prompt);
+    formData.append('n', '1');
+    formData.append('size', size);
+    formData.append('response_format', 'b64_json');
+    files.forEach((file, index) => {
+      formData.append(
+        'image',
+        this.fileToBlob(file),
+        file.originalname || `reference-${index + 1}.png`,
+      );
+    });
 
     return axios.post<OpenAIImageResponse>(
       `${connection.baseUrl}/v1/images/edits`,
-      data,
+      formData,
       {
-        headers,
+        headers: {
+          Authorization: `Bearer ${connection.apiKey}`,
+        },
         timeout: 1200000,
       },
     );
@@ -367,13 +353,9 @@ export class AiService {
     });
   }
 
-  private fileToDataUrl(file: UploadedImageFile): string {
-    const mimeType = file.mimetype || 'application/octet-stream';
-    return `data:${mimeType};base64,${file.buffer.toString('base64')}`;
-  }
-
   private async extractImageBuffer(
     response: OpenAIImageResponse,
+    connection: AiLineConnection,
   ): Promise<GenerateImageResult> {
     const image = response.data?.[0];
     if (image?.b64_json) {
@@ -383,7 +365,10 @@ export class AiService {
     }
 
     if (image?.url) {
-      const imageResponse = await this.downloadGeneratedImage(image.url);
+      const imageResponse = await this.downloadGeneratedImage(
+        image.url,
+        connection,
+      );
       return this.createGeneratedImageResult(Buffer.from(imageResponse.data));
     }
 
@@ -421,13 +406,20 @@ export class AiService {
     return connection;
   }
 
-  private async downloadGeneratedImage(imageUrl: string) {
+  private async downloadGeneratedImage(
+    imageUrl: string,
+    connection: AiLineConnection,
+  ) {
     const attempts = 4;
+    const headers = this.isSameOrigin(imageUrl, connection.baseUrl)
+      ? { Authorization: `Bearer ${connection.apiKey}` }
+      : undefined;
 
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
       try {
         return await axios.get<ArrayBuffer>(imageUrl, {
           responseType: 'arraybuffer',
+          headers,
           timeout: 120000,
         });
       } catch (error: unknown) {
@@ -446,6 +438,13 @@ export class AiService {
     throw new Error('Generated image download failed');
   }
 
+  private isSameOrigin(url: string, baseUrl: string): boolean {
+    try {
+      return new URL(url).origin === new URL(baseUrl).origin;
+    } catch {
+      return false;
+    }
+  }
   private isRetryableProviderError(error: unknown): boolean {
     const code =
       typeof error === 'object' && error && 'code' in error

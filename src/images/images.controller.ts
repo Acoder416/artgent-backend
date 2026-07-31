@@ -85,6 +85,17 @@ export class ImagesController {
     return this.imagesService.findByUserId(req.user.id, page, limit);
   }
 
+  @Get('statuses')
+  @UseGuards(JwtAuthGuard)
+  async findStatuses(
+    @Request() req: { user: { id: number } },
+    @Query('ids') ids?: string,
+  ) {
+    return {
+      images: await this.imagesService.findStatusesByUserId(req.user.id, ids),
+    };
+  }
+
   @Delete('failed')
   @UseGuards(JwtAuthGuard)
   deleteFailed(@Request() req: { user: { id: number } }) {

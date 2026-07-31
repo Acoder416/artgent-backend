@@ -7,7 +7,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, Repository } from 'typeorm';
+import { DataSource, In, Repository } from 'typeorm';
 import { UsersService } from '../users/users.service';
 import { MinioService } from '../upload/minio.service';
 import { detectImageMetadata } from '../upload/image-format';
@@ -180,6 +180,43 @@ export class ImagesService {
     return { ...file, filename: `cadriva-${image.id}.${extension}` };
   }
 
+  async findStatusesByUserId(
+    userId: number,
+    idsQuery?: string,
+  ): Promise<Image[]> {
+    if (typeof idsQuery !== 'string') {
+      throw new BadRequestException(
+        'ids must contain between 1 and 100 positive integers',
+      );
+    }
+    const rawIds = idsQuery.split(',');
+    if (rawIds.length === 0 || rawIds.length > 100) {
+      throw new BadRequestException(
+        'ids must contain between 1 and 100 positive integers',
+      );
+    }
+
+    const ids = rawIds.map((rawId) => {
+      const value = rawId.trim();
+      if (!/^\d+$/.test(value)) {
+        throw new BadRequestException(
+          'ids must contain only positive integers',
+        );
+      }
+      const id = Number(value);
+      if (!Number.isSafeInteger(id) || id <= 0) {
+        throw new BadRequestException(
+          'ids must contain only positive integers',
+        );
+      }
+      return id;
+    });
+
+    return this.imagesRepository.find({
+      where: { userId, id: In([...new Set(ids)]) },
+    });
+  }
+
   async findByUserId(userId: number, page = 1, limit = 60) {
     const safeLimit = Math.min(Math.max(Number(limit) || 60, 1), 100);
     const safePage = Math.max(Number(page) || 1, 1);
@@ -251,22 +288,69 @@ export class ImagesService {
       ...(referenceImage?.files || []),
       ...(referenceImage?.file ? [referenceImage.file] : []),
     ];
-    if (files.length > 5) {
+    const urls = Array.from(
+      new Set(
+        [
+          ...inputUrls,
+          ...(referenceImage?.urls || []),
+          ...(referenceImage?.url ? [referenceImage.url] : []),
+        ]
+          .map((url) => url.trim())
+          .filter(Boolean),
+      ),
+    );
+    if (files.length + urls.length > 5) {
       throw new BadRequestException(
         'A maximum of 5 reference images is allowed',
       );
     }
 
-    const references: ImageJobInputReference[] = Array.from(
-      new Set([
-        ...inputUrls,
-        ...(referenceImage?.urls || []),
-        ...(referenceImage?.url ? [referenceImage.url] : []),
-      ]),
-    ).map((url) => ({ kind: 'url', url }));
+    const references: ImageJobInputReference[] = [];
     const storedKeys: string[] = [];
 
     try {
+      for (const [index, url] of urls.entries()) {
+        let source: Awaited<ReturnType<MinioService['readImageByUrl']>>;
+        try {
+          source = await this.minioService.readImageByUrl(url);
+        } catch (error: unknown) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          if (
+            message === 'Unsupported image URL' ||
+            message === 'Image not found' ||
+            message.startsWith('Unsupported stored image format:')
+          ) {
+            throw new BadRequestException(
+              'Reference image URL must point to an ArtGen image',
+            );
+          }
+          throw error;
+        }
+
+        const extension =
+          source.imageFormat === 'jpeg' ? 'jpg' : source.imageFormat;
+        const key =
+          `job-inputs/${userId}/${requestId}/${index + 1}-` +
+          `${randomUUID().slice(0, 8)}.${extension}`;
+        const stored = await this.minioService.storeImage(
+          source.buffer,
+          userId,
+          { key },
+        );
+        storedKeys.push(stored.key);
+        const sourceSegments = source.key.split('/');
+        references.push({
+          kind: 'object',
+          key: stored.key,
+          url: stored.url,
+          mimeType: stored.mimeType,
+          originalName:
+            sourceSegments[sourceSegments.length - 1] ||
+            `reference-${index + 1}.${extension}`,
+        });
+      }
+
       for (const [index, file] of files.entries()) {
         const metadata = detectImageMetadata(file.buffer);
         if (!metadata) {
@@ -274,8 +358,9 @@ export class ImagesService {
             'Reference images must be PNG, JPEG, or WebP files',
           );
         }
+        const position = urls.length + index + 1;
         const key =
-          `job-inputs/${userId}/${requestId}/${index + 1}-` +
+          `job-inputs/${userId}/${requestId}/${position}-` +
           `${randomUUID().slice(0, 8)}.${metadata.imageFormat}`;
         const stored = await this.minioService.storeImage(file.buffer, userId, {
           key,
@@ -288,7 +373,7 @@ export class ImagesService {
           mimeType: stored.mimeType,
           originalName:
             file.originalname ||
-            `reference-${index + 1}.${metadata.imageFormat}`,
+            `reference-${position}.${metadata.imageFormat}`,
         });
       }
       return references;

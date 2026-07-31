@@ -158,6 +158,41 @@ describe('MinioService stored image recovery', () => {
     });
   });
 
+  it('reads an owned public image URL into a buffer', async () => {
+    const { client, service } = createHarness({
+      statObject: jest.fn().mockResolvedValue({
+        size: PNG.length,
+        metaData: { 'content-type': 'image/png' },
+      }),
+      getObject: jest.fn().mockResolvedValue(Readable.from([PNG])),
+    });
+
+    await expect(
+      service.readImageByUrl('https://cdn.test/artgen/images/7/image-42.png'),
+    ).resolves.toEqual({
+      key: 'images/7/image-42.png',
+      url: 'https://cdn.test/artgen/images/7/image-42.png',
+      size: PNG.length,
+      mimeType: 'image/png',
+      imageFormat: 'png',
+      buffer: PNG,
+    });
+    expect(client.statObject).toHaveBeenCalledWith(
+      'artgen-test',
+      'images/7/image-42.png',
+    );
+  });
+
+  it('rejects an external URL without reading MinIO', async () => {
+    const { client, service } = createHarness();
+
+    await expect(
+      service.readImageByUrl('https://untrusted.test/reference.png'),
+    ).rejects.toThrow('Unsupported image URL');
+    expect(client.statObject).not.toHaveBeenCalled();
+    expect(client.getObject).not.toHaveBeenCalled();
+  });
+
   it('surfaces strict URL deletion failures so callers can keep their rows', async () => {
     const storageError = new Error('MinIO unavailable');
     const { client, service } = createHarness({

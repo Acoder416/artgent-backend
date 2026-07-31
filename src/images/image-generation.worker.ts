@@ -28,7 +28,6 @@ import {
 } from './image.entity';
 import type { ReferenceImage } from './types/uploaded-image-file';
 
-const OUTPUT_FORMATS: ImageFormat[] = ['png', 'jpeg', 'webp'];
 const RETRY_DELAYS_MS = [5_000, 30_000, 120_000];
 
 @Injectable()
@@ -390,12 +389,6 @@ export class ImageGenerationWorker
       if (persisted) return persisted;
     }
 
-    for (const format of OUTPUT_FORMATS) {
-      const stored = await this.minioService.statImage(
-        this.legacyOutputKey(image.userId, image.id, format),
-      );
-      if (stored) return stored;
-    }
     return null;
   }
 
@@ -444,13 +437,23 @@ export class ImageGenerationWorker
   ): Promise<ReferenceImage | undefined> {
     if (references.length === 0) return undefined;
     const files: NonNullable<ReferenceImage['files']> = [];
-    const urls: string[] = [];
 
-    for (const reference of references) {
+    for (const [index, reference] of references.entries()) {
       if (reference.kind === 'url') {
-        urls.push(reference.url);
+        const source = await this.minioService.readImageByUrl(reference.url);
+        const sourceSegments = source.key.split('/');
+        const extension =
+          source.imageFormat === 'jpeg' ? 'jpg' : source.imageFormat;
+        files.push({
+          buffer: source.buffer,
+          mimetype: source.mimeType,
+          originalname:
+            sourceSegments[sourceSegments.length - 1] ||
+            `reference-${index + 1}.${extension}`,
+        });
         continue;
       }
+
       files.push({
         buffer: await this.minioService.readImage(reference.key),
         mimetype: reference.mimeType,
@@ -458,7 +461,7 @@ export class ImageGenerationWorker
       });
     }
 
-    return { files, urls };
+    return { files };
   }
 
   private async completeJob(
@@ -709,14 +712,6 @@ export class ImageGenerationWorker
 
       if (legacyJobs.length < 500 || transitioned === 0) return;
     }
-  }
-
-  private legacyOutputKey(
-    userId: number,
-    imageId: number,
-    format: ImageFormat,
-  ): string {
-    return `images/${userId}/${imageId}.${format}`;
   }
 
   private outputKey(

@@ -31,6 +31,10 @@ export interface OpenedStoredImage extends StoredImageObject {
   contentType: ImageMimeType;
 }
 
+export interface ReadStoredImage extends StoredImageObject {
+  buffer: Buffer;
+}
+
 @Injectable()
 export class MinioService implements OnModuleInit {
   private readonly logger = new Logger(MinioService.name);
@@ -96,11 +100,19 @@ export class MinioService implements OnModuleInit {
       this.bucket,
       this.validateObjectKey(key),
     );
-    const chunks: Buffer[] = [];
-    for await (const chunk of stream as AsyncIterable<Uint8Array | string>) {
-      chunks.push(Buffer.from(chunk));
-    }
-    return Buffer.concat(chunks);
+    return this.readStream(stream);
+  }
+
+  async readImageByUrl(imageUrl: string): Promise<ReadStoredImage> {
+    const opened = await this.openImageByUrl(imageUrl);
+    return {
+      key: opened.key,
+      url: opened.url,
+      size: opened.size,
+      mimeType: opened.mimeType,
+      imageFormat: opened.imageFormat,
+      buffer: await this.readStream(opened.stream),
+    };
   }
 
   async statImage(key: string): Promise<StoredImageObject | null> {
@@ -160,6 +172,14 @@ export class MinioService implements OnModuleInit {
     const safeKey = this.validateObjectKey(key);
     await this.minioClient.removeObject(this.bucket, safeKey);
     this.logger.log(`Image deleted: ${safeKey}`);
+  }
+
+  private async readStream(stream: Readable): Promise<Buffer> {
+    const chunks: Buffer[] = [];
+    for await (const chunk of stream as AsyncIterable<Uint8Array | string>) {
+      chunks.push(Buffer.from(chunk));
+    }
+    return Buffer.concat(chunks);
   }
 
   private createObjectKey(

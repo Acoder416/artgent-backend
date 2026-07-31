@@ -89,6 +89,158 @@ describe('ImagesService durable enqueue', () => {
     expect(wake).toHaveBeenCalledWith(result.images.map((image) => image.id));
   });
 
+  it('copies an owned MinIO URL into durable job input storage', async () => {
+    const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+    const sourceUrl = 'https://static.lzljz.top/artgen/images/4/existing.png';
+    const user = Object.assign(new User(), {
+      id: 4,
+      credits: 5,
+      totalCreditsSpent: 0,
+      role: 'user',
+    });
+    const rows: Image[] = [];
+    const imageRepository = {
+      create: (input: Partial<Image>) => Object.assign(new Image(), input),
+      save: jest.fn((images: Image[]) => {
+        images.forEach((image, index) => {
+          image.id = index + 1;
+          rows.push(image);
+        });
+        return Promise.resolve(images);
+      }),
+    } as unknown as Repository<Image>;
+    const usersService = {
+      findById: jest.fn().mockResolvedValue(user),
+      deductCredits: jest.fn().mockResolvedValue(user),
+      refundCreditsOnce: jest.fn(),
+    } as unknown as UsersService;
+    const readImageByUrl = jest.fn().mockResolvedValue({
+      key: 'images/4/existing.png',
+      url: sourceUrl,
+      size: png.length,
+      mimeType: 'image/png',
+      imageFormat: 'png',
+      buffer: png,
+    });
+    const storeImage = jest.fn(
+      (_buffer: Buffer, _userId: number, options: { key: string }) =>
+        Promise.resolve({
+          key: options.key,
+          url: `https://static.lzljz.top/artgen/${options.key}`,
+          imageFormat: 'png',
+          mimeType: 'image/png',
+        }),
+    );
+    const wake = jest.fn();
+    const service = new ImagesService(
+      imageRepository,
+      usersService,
+      { resolveLineId: () => 'line-a' } as unknown as AiService,
+      { readImageByUrl, storeImage } as unknown as MinioService,
+      { wake } as unknown as ImageGenerationWorker,
+    );
+
+    await service.generateBatch(user.id, {
+      prompt: 'Keep the subject and replace the background',
+      referenceImageUrls: [sourceUrl],
+    });
+
+    expect(readImageByUrl).toHaveBeenCalledWith(sourceUrl);
+    expect(storeImage).toHaveBeenCalledTimes(1);
+    const [stagedBuffer, stagedUserId, stagedOptions] =
+      storeImage.mock.calls[0];
+    expect(stagedBuffer).toBe(png);
+    expect(stagedUserId).toBe(user.id);
+    expect(stagedOptions.key).toMatch(
+      /^job-inputs\/4\/[a-f0-9-]+\/1-[a-f0-9]{8}\.png$/,
+    );
+    expect(rows[0].inputReferences).toEqual([
+      expect.objectContaining({
+        kind: 'object',
+        mimeType: 'image/png',
+        originalName: 'existing.png',
+      }),
+    ]);
+    expect(rows[0].inputReferences).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ kind: 'url' })]),
+    );
+  });
+
+  it('rejects external reference URLs before charging or saving a job', async () => {
+    const save = jest.fn();
+    const deductCredits = jest.fn();
+    const readImageByUrl = jest
+      .fn()
+      .mockRejectedValue(new Error('Unsupported image URL'));
+    const service = new ImagesService(
+      {
+        create: (input: Partial<Image>) => Object.assign(new Image(), input),
+        save,
+      } as unknown as Repository<Image>,
+      {
+        findById: jest.fn().mockResolvedValue({
+          id: 5,
+          role: 'user',
+          credits: 5,
+        }),
+        deductCredits,
+      } as unknown as UsersService,
+      { resolveLineId: () => 'line-a' } as unknown as AiService,
+      { readImageByUrl, storeImage: jest.fn() } as unknown as MinioService,
+    );
+
+    await expect(
+      service.generateBatch(5, {
+        prompt: 'Use an external reference',
+        referenceImageUrls: ['https://untrusted.test/reference.png'],
+      }),
+    ).rejects.toThrow('Reference image URL must point to an ArtGen image');
+
+    expect(save).not.toHaveBeenCalled();
+    expect(deductCredits).not.toHaveBeenCalled();
+  });
+
+  it('limits uploaded files and URL references to five images in total', async () => {
+    const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+    const storeImage = jest.fn();
+    const readImageByUrl = jest.fn();
+    const service = new ImagesService(
+      {} as Repository<Image>,
+      {
+        findById: jest.fn().mockResolvedValue({
+          id: 6,
+          role: 'user',
+          credits: 10,
+        }),
+      } as unknown as UsersService,
+      { resolveLineId: () => 'line-a' } as unknown as AiService,
+      { readImageByUrl, storeImage } as unknown as MinioService,
+    );
+
+    await expect(
+      service.generateBatch(
+        6,
+        {
+          prompt: 'Too many references',
+          referenceImageUrls: [
+            'https://static.test/artgen/images/6/first.png',
+            'https://static.test/artgen/images/6/second.png',
+          ],
+        },
+        {
+          files: Array.from({ length: 4 }, (_, index) => ({
+            buffer: png,
+            mimetype: 'image/png',
+            originalname: `upload-${index + 1}.png`,
+          })),
+        },
+      ),
+    ).rejects.toThrow('A maximum of 5 reference images is allowed');
+
+    expect(readImageByUrl).not.toHaveBeenCalled();
+    expect(storeImage).not.toHaveBeenCalled();
+  });
+
   it('refunds credits and removes staged inputs when persisting the batch fails', async () => {
     const user = Object.assign(new User(), {
       id: 8,
