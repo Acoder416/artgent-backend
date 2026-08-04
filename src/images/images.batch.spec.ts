@@ -59,10 +59,11 @@ describe('ImagesService batch generation', () => {
     expect(new Set(result.images.map((item) => item.requestId)).size).toBe(1);
     expect(result.images[0]).toMatchObject({
       status: 'pending',
-      width: 1632,
-      height: 2048,
+      width: 1600,
+      height: 2000,
       aspectRatio: '4:5',
       resolution: '2K',
+      quality: 'auto',
       template: 'ecommerce',
     });
     expect(user.credits).toBe(7);

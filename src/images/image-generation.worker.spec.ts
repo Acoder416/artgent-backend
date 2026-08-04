@@ -21,6 +21,7 @@ function pendingImage(id: number): Image {
     requestId: 'request-1',
     prompt: `Prompt ${id}`,
     model: 'gpt-image-2',
+    quality: 'auto',
     lineId: 'line-a',
     width: 1024,
     height: 1024,
@@ -225,6 +226,7 @@ describe('ImageGenerationWorker concurrency', () => {
   });
   it('reclaims an expired job and restores uploaded reference files', async () => {
     const row = pendingImage(9);
+    row.quality = 'high';
     row.status = 'generating';
     row.attemptCount = 1;
     row.leaseToken = 'expired-lease';
@@ -329,6 +331,7 @@ describe('ImageGenerationWorker concurrency', () => {
         ],
       }),
       row.lineId,
+      'high',
     );
     await worker.onApplicationShutdown();
   });

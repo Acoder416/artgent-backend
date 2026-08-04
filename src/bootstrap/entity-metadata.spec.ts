@@ -36,6 +36,7 @@ describe('MySQL entity metadata', () => {
         'leaseExpiresAt',
         'mimeType',
         'imageFormat',
+        'quality',
       ].every((property) =>
         imageMetadata.columns.some(
           (column) => column.propertyName === property,

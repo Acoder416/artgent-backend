@@ -26,6 +26,7 @@ import {
   Image,
   LEGACY_IMAGE_JOB_VERSION,
 } from './image.entity';
+import { DEFAULT_IMAGE_QUALITY } from './image-parameters';
 import type { ReferenceImage } from './types/uploaded-image-file';
 
 const RETRY_DELAYS_MS = [5_000, 30_000, 120_000];
@@ -236,6 +237,7 @@ export class ImageGenerationWorker
         `${claimed.width}x${claimed.height}`,
         referenceImage,
         claimed.lineId,
+        claimed.quality || DEFAULT_IMAGE_QUALITY,
       );
 
       if (!result.success) {

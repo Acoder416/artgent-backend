@@ -14,6 +14,7 @@ import {
 } from '../upload/image-format';
 import type { AiLineId } from './ai-line';
 import { AiLineConnection, loadAiLinesConfiguration } from './ai-lines.config';
+import { DEFAULT_IMAGE_QUALITY, type ImageQuality } from './image-parameters';
 import { ReferenceImage, UploadedImageFile } from './types/uploaded-image-file';
 
 export type GenerateImageResult =
@@ -158,6 +159,7 @@ export class AiService {
     size: string = '1024x1024',
     referenceImage?: ReferenceImage,
     lineId?: AiLineId,
+    quality: ImageQuality = DEFAULT_IMAGE_QUALITY,
   ): Promise<GenerateImageResult> {
     const referenceCount =
       (referenceImage?.files?.length || 0) +
@@ -187,10 +189,11 @@ export class AiService {
               prompt,
               model,
               size,
+              quality,
               referenceImage || {},
               connection,
             )
-          : await this.createImage(prompt, model, size, connection);
+          : await this.createImage(prompt, model, size, quality, connection);
 
       return await this.extractImageBuffer(response.data, connection);
     } catch (error: unknown) {
@@ -269,6 +272,7 @@ export class AiService {
     prompt: string,
     model: string,
     size: string,
+    quality: ImageQuality,
     connection: AiLineConnection,
   ) {
     return axios.post<OpenAIImageResponse>(
@@ -278,7 +282,7 @@ export class AiService {
         prompt,
         n: 1,
         size,
-        response_format: 'b64_json',
+        quality,
       },
       {
         headers: {
@@ -294,6 +298,7 @@ export class AiService {
     prompt: string,
     model: string,
     size: string,
+    quality: ImageQuality,
     referenceImage: ReferenceImage,
     connection: AiLineConnection,
   ) {
@@ -320,7 +325,7 @@ export class AiService {
     formData.append('prompt', prompt);
     formData.append('n', '1');
     formData.append('size', size);
-    formData.append('response_format', 'b64_json');
+    formData.append('quality', quality);
     files.forEach((file, index) => {
       formData.append(
         'image',

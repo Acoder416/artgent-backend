@@ -11,6 +11,11 @@ import {
 import { User } from '../users/user.entity';
 import { AI_LINE_ID_MAX_LENGTH } from './ai-line';
 import type { ImageJobInputReference } from './generation-input';
+import type {
+  ImageAspectRatio,
+  ImageQuality,
+  ImageResolution,
+} from './image-parameters';
 
 export type ImageStatus = 'pending' | 'generating' | 'completed' | 'failed';
 export const LEGACY_IMAGE_JOB_VERSION = 0;
@@ -46,6 +51,9 @@ export class Image {
   @Column({ length: 100, default: 'gpt-image-2' })
   model: string;
 
+  @Column({ type: 'varchar', length: 10, default: 'auto' })
+  quality: ImageQuality;
+
   @Column({
     length: AI_LINE_ID_MAX_LENGTH,
     name: 'line_id',
@@ -53,11 +61,11 @@ export class Image {
   })
   lineId: string;
 
-  @Column({ length: 10, name: 'aspect_ratio', default: '1:1' })
-  aspectRatio: string;
+  @Column({ type: 'varchar', length: 10, name: 'aspect_ratio', default: '1:1' })
+  aspectRatio: ImageAspectRatio;
 
-  @Column({ length: 10, default: '1K' })
-  resolution: string;
+  @Column({ type: 'varchar', length: 10, default: '1K' })
+  resolution: ImageResolution;
 
   @Column({ type: 'varchar', length: 500, name: 'image_url', nullable: true })
   imageUrl: string | null;

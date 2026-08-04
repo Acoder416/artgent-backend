@@ -16,6 +16,16 @@ import type { AiLineId } from './ai.service';
 import type { ImageJobInputReference } from './generation-input';
 import { ImageGenerationWorker } from './image-generation.worker';
 import { DURABLE_IMAGE_JOB_VERSION, Image } from './image.entity';
+import {
+  DEFAULT_IMAGE_ASPECT_RATIO,
+  DEFAULT_IMAGE_QUALITY,
+  DEFAULT_IMAGE_RESOLUTION,
+  MAX_IMAGE_PIXEL_COUNT,
+  resolveImageSize,
+  type ImageAspectRatio,
+  type ImageQuality,
+  type ImageResolution,
+} from './image-parameters';
 import { ReferenceImage } from './types/uploaded-image-file';
 
 export interface GenerateBatchInput {
@@ -23,8 +33,9 @@ export interface GenerateBatchInput {
   model?: string;
   lineId?: AiLineId;
   template?: string;
-  aspectRatio?: string;
-  resolution?: string;
+  aspectRatio?: ImageAspectRatio;
+  resolution?: ImageResolution;
+  quality?: ImageQuality;
   quantity?: number;
   size?: string;
   referenceImageUrls?: string[];
@@ -74,9 +85,10 @@ export class ImagesService {
       );
     }
     const model = input.model || 'gpt-image-2';
-    const aspectRatio = input.aspectRatio || '1:1';
-    const resolution = input.resolution || '1K';
-    const size = input.size || this.resolveImageSize(aspectRatio, resolution);
+    const aspectRatio = input.aspectRatio || DEFAULT_IMAGE_ASPECT_RATIO;
+    const resolution = input.resolution || DEFAULT_IMAGE_RESOLUTION;
+    const quality = input.quality || DEFAULT_IMAGE_QUALITY;
+    const size = input.size || resolveImageSize(resolution, aspectRatio);
     const dimensions = this.parseImageSize(size);
 
     const requestId = randomUUID();
@@ -100,6 +112,7 @@ export class ImagesService {
           prompt: input.prompt,
           template: input.template || 'custom',
           model,
+          quality,
           lineId,
           aspectRatio,
           resolution,
@@ -384,16 +397,6 @@ export class ImagesService {
       throw error;
     }
   }
-  private resolveImageSize(aspectRatio: string, resolution: string): string {
-    const longEdge = { '1K': 1024, '2K': 2048, '4K': 3840 }[resolution] || 1024;
-    const [widthRatio, heightRatio] = aspectRatio.split(':').map(Number);
-    if (!widthRatio || !heightRatio || widthRatio === heightRatio)
-      return `${longEdge}x${longEdge}`;
-    return widthRatio > heightRatio
-      ? `${longEdge}x${this.roundToImageGrid((longEdge * heightRatio) / widthRatio)}`
-      : `${this.roundToImageGrid((longEdge * widthRatio) / heightRatio)}x${longEdge}`;
-  }
-
   private parseImageSize(size: string): { width: number; height: number } {
     const match = size.match(/^(\d+)x(\d+)$/);
     if (!match) throw new BadRequestException('Invalid image size');
@@ -405,16 +408,13 @@ export class ImagesService {
       width > 4096 ||
       height > 4096 ||
       width % 16 !== 0 ||
-      height % 16 !== 0
+      height % 16 !== 0 ||
+      width * height > MAX_IMAGE_PIXEL_COUNT
     ) {
       throw new BadRequestException(
-        'Image width and height must be multiples of 16 between 16 and 4096',
+        'Image size must use 16-pixel increments and stay within the provider pixel limit',
       );
     }
     return { width, height };
-  }
-
-  private roundToImageGrid(value: number): number {
-    return Math.max(16, Math.round(value / 16) * 16);
   }
 }

@@ -9,6 +9,14 @@ import {
   Min,
 } from 'class-validator';
 import { AI_LINE_ID_PATTERN } from '../ai-line';
+import {
+  IMAGE_ASPECT_RATIOS,
+  IMAGE_QUALITIES,
+  IMAGE_RESOLUTIONS,
+  type ImageAspectRatio,
+  type ImageQuality,
+  type ImageResolution,
+} from '../image-parameters';
 
 export class CreateImageDto {
   @IsString()
@@ -27,19 +35,34 @@ export class CreateImageDto {
   template = 'custom';
 
   @IsOptional()
-  @IsIn(['1:1', '4:5', '3:4', '2:3', '3:2', '16:9', '9:16'])
-  aspectRatio = '1:1';
+  @IsIn([...IMAGE_ASPECT_RATIOS])
+  aspectRatio?: ImageAspectRatio;
 
   @IsOptional()
-  @IsIn(['1K', '2K', '4K'])
-  resolution = '1K';
+  @IsIn([...IMAGE_ASPECT_RATIOS])
+  aspect_ratio?: ImageAspectRatio;
+
+  @IsOptional()
+  @IsIn([...IMAGE_RESOLUTIONS])
+  resolution?: ImageResolution;
+
+  @IsOptional()
+  @IsIn([...IMAGE_QUALITIES])
+  quality?: ImageQuality;
 
   @IsOptional()
   @Type(() => Number)
   @IsInt()
   @Min(1)
   @Max(5)
-  quantity = 1;
+  quantity?: number;
+
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(5)
+  n?: number;
 
   @IsOptional()
   @IsString()

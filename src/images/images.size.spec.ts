@@ -8,7 +8,7 @@ import { Image } from './image.entity';
 import { ImagesService } from './images.service';
 
 describe('ImagesService image sizes', () => {
-  it('rejects an explicit size whose edges are not multiples of 16', async () => {
+  it('rejects explicit sizes outside provider constraints', async () => {
     const administrator = Object.assign(new User(), {
       id: 1,
       credits: 0,
@@ -32,11 +32,13 @@ describe('ImagesService image sizes', () => {
       {} as MinioService,
     );
 
-    await expect(
-      service.generateBatch(1, {
-        prompt: 'A product photograph',
-        size: '819x1024',
-      }),
-    ).rejects.toBeInstanceOf(BadRequestException);
+    for (const size of ['819x1024', '3840x3840', '4096x4096']) {
+      await expect(
+        service.generateBatch(1, {
+          prompt: 'A product photograph',
+          size,
+        }),
+      ).rejects.toBeInstanceOf(BadRequestException);
+    }
   });
 });

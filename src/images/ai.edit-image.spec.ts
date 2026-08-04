@@ -28,7 +28,7 @@ describe('AiService image edit request encoding', () => {
     const result = await createService().generateImage(
       'Keep the composition',
       'gpt-image-2',
-      '1024x1024',
+      '1600x2000',
       {
         files: [
           {
@@ -38,6 +38,8 @@ describe('AiService image edit request encoding', () => {
           },
         ],
       },
+      undefined,
+      'medium',
     );
 
     expect(result.success).toBe(true);
@@ -45,6 +47,12 @@ describe('AiService image edit request encoding', () => {
     expect(url).toBe('https://gateway.test/v1/images/edits');
     expect(data).toBeInstanceOf(FormData);
     expect((data as FormData).getAll('image')).toHaveLength(1);
+    expect((data as FormData).get('size')).toBe('1600x2000');
+    expect((data as FormData).get('quality')).toBe('medium');
+    expect((data as FormData).get('n')).toBe('1');
+    expect((data as FormData).has('aspectRatio')).toBe(false);
+    expect((data as FormData).has('aspect_ratio')).toBe(false);
+    expect((data as FormData).has('response_format')).toBe(false);
     expect(config?.headers).toEqual({
       Authorization: 'Bearer test-key',
     });
