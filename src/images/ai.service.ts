@@ -6,7 +6,9 @@ import {
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import axios from 'axios';
+import axios, { type AxiosResponse } from 'axios';
+import { createParser } from 'eventsource-parser';
+import { Readable } from 'node:stream';
 import {
   detectImageMetadata,
   ImageFormat,
@@ -51,6 +53,26 @@ interface OpenAIImageResponse {
   };
 }
 
+interface OpenAIImageStreamEvent {
+  type?: string;
+  message?: string;
+  b64_json?: string;
+  url?: string;
+  error?: {
+    message?: string;
+  };
+}
+
+class ImageStreamError extends Error {
+  constructor(
+    message: string,
+    readonly retryable: boolean,
+  ) {
+    super(message);
+    this.name = 'ImageStreamError';
+  }
+}
+
 interface OpenAIChatResponse {
   choices?: Array<{
     message?: {
@@ -81,6 +103,7 @@ const fallbackImageModels = [
   'gpt-image-1.5',
   'gpt-image-2',
 ];
+const IMAGE_PARTIAL_IMAGES = 0;
 
 @Injectable()
 export class AiService {
@@ -88,6 +111,7 @@ export class AiService {
   private readonly connections: Map<AiLineId, AiLineConnection>;
   private readonly defaultLineId: AiLineId;
   private readonly promptRewriteModel: string;
+  private readonly imageStreamEnabled: boolean;
 
   constructor(private configService: ConfigService) {
     const configuration = loadAiLinesConfiguration({
@@ -107,6 +131,35 @@ export class AiService {
       'PROMPT_REWRITE_MODEL',
       'gpt-5.4-mini',
     );
+    const streamEnabled = this.configService.get<string | boolean>(
+      'IMAGE_STREAM_ENABLED',
+      true,
+    );
+    if (typeof streamEnabled === 'boolean') {
+      this.imageStreamEnabled = streamEnabled;
+    } else {
+      const normalizedStreamEnabled = streamEnabled.trim().toLowerCase();
+      const enabledValues = ['1', 'true', 'on', 'yes'];
+      const disabledValues = ['0', 'false', 'off', 'no'];
+      if (
+        !enabledValues.includes(normalizedStreamEnabled) &&
+        !disabledValues.includes(normalizedStreamEnabled)
+      ) {
+        throw new Error('IMAGE_STREAM_ENABLED must be true or false');
+      }
+      this.imageStreamEnabled = enabledValues.includes(normalizedStreamEnabled);
+    }
+    const configuredPartialImages = Number(
+      this.configService.get<string | number>(
+        'IMAGE_PARTIAL_IMAGES',
+        IMAGE_PARTIAL_IMAGES,
+      ),
+    );
+    if (configuredPartialImages !== IMAGE_PARTIAL_IMAGES) {
+      this.logger.warn(
+        'IMAGE_PARTIAL_IMAGES is fixed at 0; ignoring configured value',
+      );
+    }
   }
 
   listLines(): { lines: AiLineSummary[]; defaultLineId: AiLineId } {
@@ -195,9 +248,9 @@ export class AiService {
             )
           : await this.createImage(prompt, model, size, quality, connection);
 
-      return await this.extractImageBuffer(response.data, connection);
+      return await this.extractImageResponse(response, connection);
     } catch (error: unknown) {
-      const message = this.generationErrorMessage(error);
+      const message = await this.generationErrorMessage(error);
       this.logger.error(`Image generation failed: ${message}`);
       return {
         success: false,
@@ -275,7 +328,7 @@ export class AiService {
     quality: ImageQuality,
     connection: AiLineConnection,
   ) {
-    return axios.post<OpenAIImageResponse>(
+    return axios.post<OpenAIImageResponse | Readable>(
       `${connection.baseUrl}/v1/images/generations`,
       {
         model,
@@ -283,13 +336,21 @@ export class AiService {
         n: 1,
         size,
         quality,
+        ...(this.imageStreamEnabled
+          ? {
+              stream: true,
+              partial_images: IMAGE_PARTIAL_IMAGES,
+            }
+          : {}),
       },
       {
         headers: {
           Authorization: `Bearer ${connection.apiKey}`,
           'Content-Type': 'application/json',
+          ...(this.imageStreamEnabled ? { Accept: 'text/event-stream' } : {}),
         },
         timeout: 1200000,
+        ...(this.imageStreamEnabled ? { responseType: 'stream' as const } : {}),
       },
     );
   }
@@ -326,6 +387,10 @@ export class AiService {
     formData.append('n', '1');
     formData.append('size', size);
     formData.append('quality', quality);
+    if (this.imageStreamEnabled) {
+      formData.append('stream', 'true');
+      formData.append('partial_images', String(IMAGE_PARTIAL_IMAGES));
+    }
     files.forEach((file, index) => {
       formData.append(
         'image',
@@ -334,14 +399,16 @@ export class AiService {
       );
     });
 
-    return axios.post<OpenAIImageResponse>(
+    return axios.post<OpenAIImageResponse | Readable>(
       `${connection.baseUrl}/v1/images/edits`,
       formData,
       {
         headers: {
           Authorization: `Bearer ${connection.apiKey}`,
+          ...(this.imageStreamEnabled ? { Accept: 'text/event-stream' } : {}),
         },
         timeout: 1200000,
+        ...(this.imageStreamEnabled ? { responseType: 'stream' as const } : {}),
       },
     );
   }
@@ -364,9 +431,16 @@ export class AiService {
   ): Promise<GenerateImageResult> {
     const image = response.data?.[0];
     if (image?.b64_json) {
-      return this.createGeneratedImageResult(
-        Buffer.from(image.b64_json, 'base64'),
-      );
+      const imageBuffer = this.decodeBase64Image(image.b64_json);
+      if (!imageBuffer) {
+        return {
+          success: false,
+          error: 'Image generation API returned invalid base64 image data',
+          retryable: true,
+        };
+      }
+
+      return this.createGeneratedImageResult(imageBuffer);
     }
 
     if (image?.url) {
@@ -383,6 +457,145 @@ export class AiService {
         response.error?.message || 'Image generation API returned no image',
       retryable: false,
     };
+  }
+
+  private async extractImageResponse(
+    response: AxiosResponse<OpenAIImageResponse | Readable>,
+    connection: AiLineConnection,
+  ): Promise<GenerateImageResult> {
+    if (!(response.data instanceof Readable)) {
+      return this.extractImageBuffer(response.data, connection);
+    }
+
+    const rawContentType = response.headers?.['content-type'];
+    const contentType =
+      typeof rawContentType === 'string' ? rawContentType.toLowerCase() : '';
+    if (contentType.includes('application/json')) {
+      const jsonResponse = await this.readJsonStream(response.data);
+      return this.extractImageBuffer(jsonResponse, connection);
+    }
+
+    return this.extractSseImageResponse(response.data, connection);
+  }
+
+  private async readJsonStream(stream: Readable): Promise<OpenAIImageResponse> {
+    const chunks: Buffer[] = [];
+    let byteLength = 0;
+
+    for await (const chunk of stream) {
+      const buffer = Buffer.isBuffer(chunk)
+        ? chunk
+        : Buffer.from(String(chunk));
+      byteLength += buffer.byteLength;
+      if (byteLength > 128 * 1024 * 1024) {
+        stream.destroy();
+        throw new Error('Image generation API response exceeded 128 MB');
+      }
+      chunks.push(buffer);
+    }
+
+    return JSON.parse(
+      Buffer.concat(chunks).toString('utf8'),
+    ) as OpenAIImageResponse;
+  }
+
+  private async extractSseImageResponse(
+    stream: Readable,
+    connection: AiLineConnection,
+  ): Promise<GenerateImageResult> {
+    let completedResponse: OpenAIImageResponse | undefined;
+    const parser = createParser({
+      onEvent: (event) => {
+        if (!event.data || event.data === '[DONE]') return;
+
+        let payload: OpenAIImageStreamEvent;
+        try {
+          payload = JSON.parse(event.data) as OpenAIImageStreamEvent;
+        } catch {
+          throw new ImageStreamError(
+            'Image generation stream returned invalid event data',
+            true,
+          );
+        }
+        const eventType = payload.type || event.event;
+        if (eventType === 'error') {
+          throw new ImageStreamError(
+            payload.error?.message ||
+              payload.message ||
+              'Image generation API returned an error event',
+            false,
+          );
+        }
+        if (
+          eventType !== 'image_generation.completed' &&
+          eventType !== 'image_edit.completed'
+        ) {
+          return;
+        }
+
+        completedResponse = {
+          data: [
+            {
+              b64_json: payload.b64_json,
+              url: payload.url,
+            },
+          ],
+          error: payload.error,
+        };
+      },
+      onError: (error) => {
+        throw new ImageStreamError(
+          `Image generation stream could not be parsed: ${error.message}`,
+          true,
+        );
+      },
+      maxBufferSize: 128 * 1024 * 1024,
+    });
+
+    stream.setEncoding('utf8');
+    try {
+      for await (const chunk of stream) {
+        parser.feed(String(chunk));
+        if (completedResponse) {
+          stream.destroy();
+          return await this.extractImageBuffer(completedResponse, connection);
+        }
+      }
+      parser.reset({ consume: true });
+      if (completedResponse) {
+        return await this.extractImageBuffer(completedResponse, connection);
+      }
+    } finally {
+      stream.destroy();
+    }
+
+    throw new ImageStreamError(
+      'Image generation stream ended without a completed event',
+      true,
+    );
+  }
+
+  private decodeBase64Image(value: string): Buffer | undefined {
+    const normalized = value.replace(/\s/g, '');
+    if (!normalized || !/^[A-Za-z0-9+/]*={0,2}$/.test(normalized)) {
+      return undefined;
+    }
+
+    const unpadded = normalized.replace(/=+$/, '');
+    if (!unpadded || unpadded.length % 4 === 1) {
+      return undefined;
+    }
+    if (normalized.includes('=') && normalized.length % 4 !== 0) {
+      return undefined;
+    }
+
+    const imageBuffer = Buffer.from(normalized, 'base64');
+    const canonicalBase64 = imageBuffer.toString('base64').replace(/=+$/, '');
+    if (canonicalBase64 !== unpadded) {
+      return undefined;
+    }
+
+    return imageBuffer;
   }
 
   private createGeneratedImageResult(imageBuffer: Buffer): GenerateImageResult {
@@ -451,6 +664,10 @@ export class AiService {
     }
   }
   private isRetryableProviderError(error: unknown): boolean {
+    if (error instanceof ImageStreamError) {
+      return error.retryable;
+    }
+
     const code =
       typeof error === 'object' && error && 'code' in error
         ? String(error.code).toUpperCase()
@@ -479,13 +696,21 @@ export class AiService {
     ].includes(code);
   }
 
-  private generationErrorMessage(error: unknown): string {
-    if (axios.isAxiosError<OpenAIImageResponse>(error)) {
-      return (
-        error.response?.data?.error?.message ||
-        error.message ||
-        'Image generation failed'
-      );
+  private async generationErrorMessage(error: unknown): Promise<string> {
+    if (axios.isAxiosError<OpenAIImageResponse | Readable>(error)) {
+      const responseData = error.response?.data;
+      if (responseData instanceof Readable) {
+        try {
+          const parsed = await this.readJsonStream(responseData);
+          if (parsed.error?.message) return parsed.error.message;
+        } catch {
+          // Fall through to Axios' transport message when the error body is unreadable.
+        }
+      } else if (responseData?.error?.message) {
+        return responseData.error.message;
+      }
+
+      return error.message || 'Image generation failed';
     }
     if (error instanceof Error && error.message) return error.message;
     if (typeof error === 'string' && error) return error;

@@ -50,11 +50,17 @@ describe('AiService image edit request encoding', () => {
     expect((data as FormData).get('size')).toBe('1600x2000');
     expect((data as FormData).get('quality')).toBe('medium');
     expect((data as FormData).get('n')).toBe('1');
+    expect((data as FormData).get('stream')).toBe('true');
+    expect((data as FormData).get('partial_images')).toBe('0');
     expect((data as FormData).has('aspectRatio')).toBe(false);
     expect((data as FormData).has('aspect_ratio')).toBe(false);
     expect((data as FormData).has('response_format')).toBe(false);
-    expect(config?.headers).toEqual({
-      Authorization: 'Bearer test-key',
+    expect(config).toMatchObject({
+      headers: {
+        Authorization: 'Bearer test-key',
+        Accept: 'text/event-stream',
+      },
+      responseType: 'stream',
     });
   });
 

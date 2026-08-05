@@ -42,6 +42,25 @@ from `1` to `20`:
 IMAGE_WORKER_CONCURRENCY=10
 ```
 
+### Provider response streaming
+
+Image generation requests use server-side SSE streaming by default. The Nest
+worker consumes the provider stream and stores only the final completed image;
+browser clients continue polling the existing image status API and never open
+an SSE connection to the provider.
+
+```env
+IMAGE_STREAM_ENABLED=true
+IMAGE_PARTIAL_IMAGES=0
+```
+
+`IMAGE_PARTIAL_IMAGES` is fixed at `0`; non-zero values are ignored with a
+startup warning so the service never requests, stores, or displays partial
+previews. Set `IMAGE_STREAM_ENABLED=false` as an emergency rollback when a
+provider does not support streaming; the backend then uses the original JSON
+response path. The flag also accepts `1/0`, `on/off`, and `yes/no`; any other
+value stops startup instead of silently selecting the wrong response mode.
+
 ## Production
 
 Build each service before starting it in production mode:
