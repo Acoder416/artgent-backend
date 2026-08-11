@@ -3,9 +3,10 @@ import axios from 'axios';
 import { createServer } from 'node:http';
 import type { AddressInfo, Socket } from 'node:net';
 import { Readable } from 'node:stream';
+import { REAL_PNG_3X2 } from '../test/image-fixtures';
 import { AiService } from './ai.service';
 
-const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const PNG = REAL_PNG_3X2;
 
 function createService(overrides: Record<string, unknown> = {}) {
   return new AiService(
@@ -282,8 +283,14 @@ describe('AiService image streaming responses', () => {
       const port = (server.address() as AddressInfo).port;
       const result = await Promise.race([
         createService({
-          AI_LINE_A_BASE_URL: `http://127.0.0.1:${port}`,
-        }).generateImage('A product photograph'),
+          AI_LINE_B_BASE_URL: `http://127.0.0.1:${port}`,
+        }).generateImage(
+          'A product photograph',
+          'gpt-image-2',
+          '1024x1024',
+          undefined,
+          'line-b',
+        ),
         new Promise<never>((_resolve, reject) => {
           timeout = setTimeout(
             () => reject(new Error('SSE response waited for connection EOF')),

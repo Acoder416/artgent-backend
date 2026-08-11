@@ -1,14 +1,17 @@
 import {
   Injectable,
   Logger,
+  Optional,
   OnApplicationBootstrap,
   OnApplicationShutdown,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   FindOptionsWhere,
+  DataSource,
+  In,
   IsNull,
   LessThan,
   LessThanOrEqual,
@@ -17,8 +20,17 @@ import {
   Repository,
 } from 'typeorm';
 import { UsersService } from '../users/users.service';
-import type { ImageFormat } from '../upload/image-format';
-import { MinioService, type StoredImage } from '../upload/minio.service';
+import {
+  inspectDecodedImage,
+  type ImageDimensions,
+  type ImageFormat,
+} from '../upload/image-format';
+import { MAX_IMAGE_UPLOAD_TOTAL_BYTES } from '../upload/aggregate-memory-storage';
+import {
+  MAX_STORED_IMAGE_READ_BYTES,
+  MinioService,
+  type StoredImage,
+} from '../upload/minio.service';
 import { AiService } from './ai.service';
 import type { ImageJobInputReference } from './generation-input';
 import {
@@ -27,9 +39,16 @@ import {
   LEGACY_IMAGE_JOB_VERSION,
 } from './image.entity';
 import { DEFAULT_IMAGE_QUALITY } from './image-parameters';
+import { InputMemoryBudget } from './input-memory-budget';
 import type { ReferenceImage } from './types/uploaded-image-file';
 
 const RETRY_DELAYS_MS = [5_000, 30_000, 120_000];
+const INPUT_MEMORY_COPY_FACTOR = 2;
+
+interface QueuedImageJob {
+  id: number;
+  lineId: string;
+}
 
 @Injectable()
 export class ImageGenerationWorker
@@ -41,12 +60,18 @@ export class ImageGenerationWorker
   private readonly leaseDurationMs: number;
   private readonly heartbeatIntervalMs: number;
   private readonly shutdownGraceMs: number;
+  private readonly lineCapacityRetryMs: number;
   private readonly maxAttempts: number;
-  private readonly queuedIds: number[] = [];
+  private readonly inputMemoryBudget: InputMemoryBudget;
+  private readonly queuedJobsByLine = new Map<string, QueuedImageJob[]>();
+  private readonly lineOrder: string[] = [];
+  private readonly activeJobsByLine = new Map<string, number>();
+  private readonly lineConcurrencyLimits = new Map<string, number>();
   private readonly scheduledIds = new Set<number>();
   private readonly activeJobs = new Set<Promise<void>>();
   private readonly pendingOutputCleanup = new Map<string, number>();
   private cleanupCursor = 0;
+  private lineCursor = 0;
   private pollTimer?: NodeJS.Timeout;
   private scanPromise?: Promise<void>;
   private stopping = false;
@@ -58,6 +83,8 @@ export class ImageGenerationWorker
     private readonly minioService: MinioService,
     private readonly usersService: UsersService,
     private readonly configService: ConfigService,
+    @Optional()
+    private readonly dataSource?: DataSource,
   ) {
     this.concurrency = this.integerConfig(
       'IMAGE_WORKER_CONCURRENCY',
@@ -87,7 +114,21 @@ export class ImageGenerationWorker
       0,
       60_000,
     );
+    this.lineCapacityRetryMs = this.integerConfig(
+      'IMAGE_LINE_CAPACITY_RETRY_MS',
+      1_000,
+      250,
+      10_000,
+    );
     this.maxAttempts = this.integerConfig('IMAGE_JOB_MAX_ATTEMPTS', 3, 1, 10);
+    this.inputMemoryBudget = new InputMemoryBudget(
+      this.integerConfig(
+        'IMAGE_WORKER_INPUT_MEMORY_BYTES',
+        192 * 1024 * 1024,
+        MAX_IMAGE_UPLOAD_TOTAL_BYTES * INPUT_MEMORY_COPY_FACTOR,
+        1024 * 1024 * 1024,
+      ),
+    );
   }
 
   async onApplicationBootstrap(): Promise<void> {
@@ -122,32 +163,57 @@ export class ImageGenerationWorker
     }
   }
 
-  wake(imageIds: number[] = []): void {
+  wake(imageIds: number[] = [], lineId?: string): void {
     if (this.stopping) return;
     if (imageIds.length === 0) {
       void this.scanForWork();
       return;
     }
-    this.enqueue(imageIds);
+    if (lineId) {
+      this.enqueue(imageIds.map((id) => ({ id, lineId })));
+      return;
+    }
+    void this.enqueueDiscoveredJobs(imageIds);
   }
 
-  private enqueue(imageIds: number[]): void {
-    for (const imageId of imageIds) {
-      if (this.scheduledIds.has(imageId)) continue;
-      this.scheduledIds.add(imageId);
-      this.queuedIds.push(imageId);
+  private async enqueueDiscoveredJobs(imageIds: number[]): Promise<void> {
+    const jobs = await Promise.all(
+      imageIds.map((id) =>
+        this.imagesRepository.findOne({
+          select: { id: true, lineId: true },
+          where: { id },
+        }),
+      ),
+    );
+    this.enqueue(
+      jobs.filter((job): job is Image => Boolean(job?.id && job.lineId)),
+    );
+  }
+
+  private enqueue(jobs: QueuedImageJob[]): void {
+    for (const job of jobs) {
+      if (this.scheduledIds.has(job.id)) continue;
+      this.scheduledIds.add(job.id);
+      let lineQueue = this.queuedJobsByLine.get(job.lineId);
+      if (!lineQueue) {
+        lineQueue = [];
+        this.queuedJobsByLine.set(job.lineId, lineQueue);
+        this.lineOrder.push(job.lineId);
+      }
+      lineQueue.push(job);
     }
     this.drain();
   }
 
   private drain(): void {
-    while (
-      !this.stopping &&
-      this.activeJobs.size < this.concurrency &&
-      this.queuedIds.length > 0
-    ) {
-      const imageId = this.queuedIds.shift();
-      if (imageId === undefined) return;
+    while (!this.stopping && this.activeJobs.size < this.concurrency) {
+      const queuedJob = this.takeNextEligibleJob();
+      if (!queuedJob) return;
+      const { id: imageId, lineId } = queuedJob;
+      this.activeJobsByLine.set(
+        lineId,
+        (this.activeJobsByLine.get(lineId) || 0) + 1,
+      );
 
       const job = this.processJob(imageId)
         .catch((error: unknown) => {
@@ -157,12 +223,62 @@ export class ImageGenerationWorker
         })
         .finally(() => {
           this.activeJobs.delete(job);
+          const remainingForLine = (this.activeJobsByLine.get(lineId) || 1) - 1;
+          if (remainingForLine === 0) this.activeJobsByLine.delete(lineId);
+          else this.activeJobsByLine.set(lineId, remainingForLine);
           this.scheduledIds.delete(imageId);
           this.drain();
           void this.scanForWork();
         });
       this.activeJobs.add(job);
     }
+  }
+
+  private takeNextEligibleJob(): QueuedImageJob | undefined {
+    const lineCount = this.lineOrder.length;
+    for (let offset = 0; offset < lineCount; offset += 1) {
+      const lineIndex = (this.lineCursor + offset) % lineCount;
+      const lineId = this.lineOrder[lineIndex];
+      const lineQueue = this.queuedJobsByLine.get(lineId);
+      if (!lineQueue || lineQueue.length === 0) continue;
+      const activeForLine = this.activeJobsByLine.get(lineId) || 0;
+      if (activeForLine >= this.lineConcurrencyLimit(lineId)) continue;
+      this.lineCursor = (lineIndex + 1) % lineCount;
+      return lineQueue.shift();
+    }
+    return undefined;
+  }
+
+  private lineConcurrencyLimit(lineId: string): number {
+    const cached = this.lineConcurrencyLimits.get(lineId);
+    if (cached !== undefined) return cached;
+    let configured = this.concurrency;
+    if (typeof this.aiService.getLineMaxConcurrency === 'function') {
+      try {
+        configured = this.aiService.getLineMaxConcurrency(lineId);
+      } catch {
+        // Historical jobs may reference a line removed from configuration.
+        // Let them enter processJob so AiService can return a terminal,
+        // non-retryable failure and the worker can refund/clean them up.
+        configured = this.concurrency;
+      }
+    }
+    const limit = Math.min(this.concurrency, Math.max(1, configured));
+    this.lineConcurrencyLimits.set(lineId, limit);
+    return limit;
+  }
+
+  private configuredLineIds(): string[] {
+    const service = this.aiService as Partial<AiService>;
+    if (typeof service.listLines !== 'function') return [];
+    return Array.from(
+      new Set(
+        service
+          .listLines()
+          .lines.map((line) => line.id)
+          .filter((lineId): lineId is string => Boolean(lineId)),
+      ),
+    );
   }
 
   private scanForWork(): Promise<void> {
@@ -198,13 +314,40 @@ export class ImageGenerationWorker
           leaseExpiresAt: IsNull(),
         },
       ];
-      const jobs = await this.imagesRepository.find({
-        select: { id: true },
-        where,
-        order: { availableAt: 'ASC', id: 'ASC' },
-        take: Math.max(50, this.concurrency * 4),
-      });
-      this.enqueue(jobs.map((job) => job.id));
+      const configuredLineIds = this.configuredLineIds();
+      let jobs: Image[];
+      if (configuredLineIds.length) {
+        const [knownLineJobs, unknownLineJobs] = await Promise.all([
+          Promise.all(
+            configuredLineIds.map((lineId) =>
+              this.imagesRepository.find({
+                select: { id: true, lineId: true },
+                where: where.map((criteria) => ({ ...criteria, lineId })),
+                order: { availableAt: 'ASC', id: 'ASC' },
+                take: Math.max(10, this.lineConcurrencyLimit(lineId) * 2),
+              }),
+            ),
+          ),
+          this.imagesRepository.find({
+            select: { id: true, lineId: true },
+            where: where.map((criteria) => ({
+              ...criteria,
+              lineId: Not(In(configuredLineIds)),
+            })),
+            order: { availableAt: 'ASC', id: 'ASC' },
+            take: Math.max(20, this.concurrency * 2),
+          }),
+        ]);
+        jobs = [...knownLineJobs.flat(), ...unknownLineJobs];
+      } else {
+        jobs = await this.imagesRepository.find({
+          select: { id: true, lineId: true },
+          where,
+          order: { availableAt: 'ASC', id: 'ASC' },
+          take: Math.max(50, this.concurrency * 4),
+        });
+      }
+      this.enqueue(jobs);
       await this.reconcileRefunds();
       await this.reconcileInputCleanup();
     } catch (error: unknown) {
@@ -224,21 +367,26 @@ export class ImageGenerationWorker
     try {
       const storedOutput = await this.findStoredOutput(claimed);
       if (storedOutput) {
-        await this.completeJob(claimed, storedOutput);
+        await this.completeJob(
+          claimed,
+          storedOutput.stored,
+          storedOutput.dimensions,
+        );
         return;
       }
 
-      const referenceImage = await this.loadReferenceImage(
-        claimed.inputReferences || [],
-      );
-      const result = await this.aiService.generateImage(
-        claimed.prompt,
-        claimed.model,
-        `${claimed.width}x${claimed.height}`,
-        referenceImage,
-        claimed.lineId,
-        claimed.quality || DEFAULT_IMAGE_QUALITY,
-      );
+      const inputReferences = claimed.inputReferences || [];
+      const result = await this.withInputMemory(inputReferences, async () => {
+        const referenceImage = await this.loadReferenceImage(inputReferences);
+        return this.aiService.generateImage(
+          claimed.prompt,
+          claimed.model,
+          `${claimed.width}x${claimed.height}`,
+          referenceImage,
+          claimed.lineId,
+          claimed.quality || DEFAULT_IMAGE_QUALITY,
+        );
+      });
 
       if (!result.success) {
         await this.handleFailure(
@@ -264,9 +412,15 @@ export class ImageGenerationWorker
         claimed.userId,
         {
           key: outputKey,
+          validatedImage: result,
         },
       );
-      if (!(await this.completeJob(claimed, stored))) {
+      if (
+        !(await this.completeJob(claimed, stored, {
+          width: result.width,
+          height: result.height,
+        }))
+      ) {
         await this.cleanupUnreferencedOutput(claimed.id, stored.key);
       }
     } catch (error: unknown) {
@@ -277,7 +431,108 @@ export class ImageGenerationWorker
   }
 
   private async claimJob(imageId: number): Promise<Image | null> {
-    const existing = await this.imagesRepository.findOne({
+    if (this.dataSource?.options.type === 'postgres') {
+      return this.dataSource.transaction(async (manager) => {
+        const repository = manager.getRepository(Image);
+        const candidate = await repository.findOne({ where: { id: imageId } });
+        if (!candidate) return null;
+        await manager.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+          `artgen:image-line:${candidate.lineId}`,
+        ]);
+        return this.claimJobWithRepository(repository, imageId, true);
+      });
+    }
+    if (
+      this.dataSource?.options.type === 'mysql' ||
+      this.dataSource?.options.type === 'mariadb'
+    ) {
+      return this.claimJobWithMysqlLineLock(imageId);
+    }
+    return this.claimJobWithRepository(this.imagesRepository, imageId, false);
+  }
+
+  private async claimJobWithMysqlLineLock(
+    imageId: number,
+  ): Promise<Image | null> {
+    const dataSource = this.dataSource;
+    if (!dataSource) return null;
+    const candidate = await this.imagesRepository.findOne({
+      select: { id: true, lineId: true },
+      where: { id: imageId },
+    });
+    if (!candidate?.lineId) return null;
+
+    const lockName = `artgen:image-line:${createHash('sha256')
+      .update(candidate.lineId)
+      .digest('hex')
+      .slice(0, 40)}`;
+    const queryRunner = dataSource.createQueryRunner();
+    let connected = false;
+    let locked = false;
+    let transactionStarted = false;
+    try {
+      await queryRunner.connect();
+      connected = true;
+      const rows = (await queryRunner.query(
+        'SELECT GET_LOCK(?, ?) AS acquired',
+        [lockName, 5],
+      )) as Array<{ acquired?: unknown }>;
+      if (Number(rows[0]?.acquired) !== 1) return null;
+      locked = true;
+
+      await queryRunner.startTransaction();
+      transactionStarted = true;
+      const repository = queryRunner.manager.getRepository(Image);
+      const claimed = await this.claimJobWithRepository(
+        repository,
+        imageId,
+        true,
+      );
+      await queryRunner.commitTransaction();
+      transactionStarted = false;
+      return claimed;
+    } catch (error: unknown) {
+      if (transactionStarted) {
+        try {
+          await queryRunner.rollbackTransaction();
+        } catch (rollbackError: unknown) {
+          this.logger.error(
+            `Unable to roll back image line claim: ${this.errorMessage(rollbackError)}`,
+          );
+        }
+        transactionStarted = false;
+      }
+      throw error;
+    } finally {
+      if (locked) {
+        try {
+          await queryRunner.query('SELECT RELEASE_LOCK(?) AS released', [
+            lockName,
+          ]);
+        } catch (error: unknown) {
+          this.logger.error(
+            `Unable to release image line lock: ${this.errorMessage(error)}`,
+          );
+        }
+      }
+      if (connected) {
+        try {
+          await queryRunner.release();
+        } catch (error: unknown) {
+          this.logger.error(
+            `Unable to release image line connection: ${this.errorMessage(error)}`,
+          );
+        }
+      }
+    }
+  }
+
+  private async claimJobWithRepository(
+    repository: Repository<Image>,
+    imageId: number,
+    enforceClusterLineLimit: boolean,
+  ): Promise<Image | null> {
+    const existing = await repository.findOne({
       where: { id: imageId },
     });
     if (!existing || existing.jobVersion !== 1) return null;
@@ -295,6 +550,21 @@ export class ImageGenerationWorker
       (!existing.leaseExpiresAt ||
         existing.leaseExpiresAt.getTime() <= now.getTime());
     if (existing.status !== 'pending' && !staleLease) return null;
+
+    if (enforceClusterLineLimit) {
+      const activeForLine = await repository.count({
+        where: {
+          jobVersion: DURABLE_IMAGE_JOB_VERSION,
+          status: 'generating',
+          lineId: existing.lineId,
+          leaseExpiresAt: MoreThan(now),
+        },
+      });
+      if (activeForLine >= this.lineConcurrencyLimit(existing.lineId)) {
+        await this.deferCapacityBlockedJob(repository, existing, now);
+        return null;
+      }
+    }
 
     const leaseToken = randomUUID();
     const leaseExpiresAt = new Date(now.getTime() + this.leaseDurationMs);
@@ -318,7 +588,7 @@ export class ImageGenerationWorker
               ? { leaseExpiresAt: existing.leaseExpiresAt }
               : { leaseExpiresAt: IsNull() }),
           };
-    const claimed = await this.imagesRepository.update(criteria, {
+    const claimed = await repository.update(criteria, {
       status: 'generating',
       leaseToken,
       leaseExpiresAt,
@@ -328,8 +598,43 @@ export class ImageGenerationWorker
     });
     if (claimed.affected !== 1) return null;
 
-    return this.imagesRepository.findOne({
+    return repository.findOne({
       where: { id: imageId, leaseToken },
+    });
+  }
+
+  private async deferCapacityBlockedJob(
+    repository: Repository<Image>,
+    existing: Image,
+    now: Date,
+  ): Promise<void> {
+    const availableAt = new Date(now.getTime() + this.lineCapacityRetryMs);
+    const criteria: FindOptionsWhere<Image> =
+      existing.status === 'pending'
+        ? {
+            id: existing.id,
+            jobVersion: DURABLE_IMAGE_JOB_VERSION,
+            status: 'pending',
+            attemptCount: existing.attemptCount,
+            availableAt: existing.availableAt,
+          }
+        : {
+            id: existing.id,
+            jobVersion: DURABLE_IMAGE_JOB_VERSION,
+            status: 'generating',
+            attemptCount: existing.attemptCount,
+            ...(existing.leaseToken
+              ? { leaseToken: existing.leaseToken }
+              : { leaseToken: IsNull() }),
+            ...(existing.leaseExpiresAt
+              ? { leaseExpiresAt: existing.leaseExpiresAt }
+              : { leaseExpiresAt: IsNull() }),
+          };
+    await repository.update(criteria, {
+      status: 'pending',
+      availableAt,
+      leaseToken: null,
+      leaseExpiresAt: null,
     });
   }
 
@@ -385,10 +690,25 @@ export class ImageGenerationWorker
     return true;
   }
 
-  private async findStoredOutput(image: Image): Promise<StoredImage | null> {
+  private async findStoredOutput(image: Image): Promise<{
+    stored: StoredImage;
+    dimensions: ImageDimensions;
+  } | null> {
     if (image.imageKey) {
       const persisted = await this.minioService.statImage(image.imageKey);
-      if (persisted) return persisted;
+      if (persisted) {
+        const imageBuffer = await this.minioService.readImage(image.imageKey);
+        const decoded = await inspectDecodedImage(imageBuffer);
+        if (decoded) {
+          return {
+            stored: persisted,
+            dimensions: { width: decoded.width, height: decoded.height },
+          };
+        }
+        this.logger.warn(
+          `Persisted output has invalid image dimensions and will be regenerated: ${image.id}`,
+        );
+      }
     }
 
     return null;
@@ -439,36 +759,84 @@ export class ImageGenerationWorker
   ): Promise<ReferenceImage | undefined> {
     if (references.length === 0) return undefined;
     const files: NonNullable<ReferenceImage['files']> = [];
+    let mask: ReferenceImage['mask'];
+    let remainingBytes = MAX_IMAGE_UPLOAD_TOTAL_BYTES;
 
     for (const [index, reference] of references.entries()) {
+      if (remainingBytes < 1) {
+        throw new Error('Image job inputs exceed the total byte limit');
+      }
       if (reference.kind === 'url') {
-        const source = await this.minioService.readImageByUrl(reference.url);
+        const source = await this.minioService.readImageByUrl(
+          reference.url,
+          Math.min(remainingBytes, MAX_STORED_IMAGE_READ_BYTES),
+        );
+        remainingBytes -= source.buffer.length;
         const sourceSegments = source.key.split('/');
         const extension =
           source.imageFormat === 'jpeg' ? 'jpg' : source.imageFormat;
-        files.push({
+        const file = {
           buffer: source.buffer,
           mimetype: source.mimeType,
           originalname:
             sourceSegments[sourceSegments.length - 1] ||
             `reference-${index + 1}.${extension}`,
-        });
+        };
+        files.push(file);
         continue;
       }
 
-      files.push({
-        buffer: await this.minioService.readImage(reference.key),
+      const file = {
+        buffer: await this.minioService.readImage(
+          reference.key,
+          Math.min(remainingBytes, MAX_STORED_IMAGE_READ_BYTES),
+        ),
         mimetype: reference.mimeType,
         originalname: reference.originalName,
-      });
+      };
+      remainingBytes -= file.buffer.length;
+      if (reference.role === 'mask') mask = file;
+      else files.push(file);
     }
 
-    return { files };
+    return { files, ...(mask ? { mask } : {}) };
+  }
+
+  private async withInputMemory<T>(
+    references: ImageJobInputReference[],
+    action: () => Promise<T>,
+  ): Promise<T> {
+    const release = await this.inputMemoryBudget.acquire(
+      this.estimatedInputBytes(references),
+    );
+    try {
+      return await action();
+    } finally {
+      release();
+    }
+  }
+
+  private estimatedInputBytes(references: ImageJobInputReference[]): number {
+    const estimated = references.reduce((total, reference) => {
+      if (
+        reference.kind === 'object' &&
+        Number.isSafeInteger(reference.size) &&
+        (reference.size || 0) > 0
+      ) {
+        return total + Math.min(reference.size!, MAX_STORED_IMAGE_READ_BYTES);
+      }
+      return total + MAX_STORED_IMAGE_READ_BYTES;
+    }, 0);
+    return (
+      Math.min(estimated, MAX_IMAGE_UPLOAD_TOTAL_BYTES) *
+      INPUT_MEMORY_COPY_FACTOR
+    );
   }
 
   private async completeJob(
     image: Image,
     stored: StoredImage,
+    dimensions?: { width?: number; height?: number },
   ): Promise<boolean> {
     const result = await this.imagesRepository.update(
       this.leaseCriteria(image.id, image.leaseToken),
@@ -478,6 +846,8 @@ export class ImageGenerationWorker
         imageKey: stored.key,
         mimeType: stored.mimeType,
         imageFormat: stored.imageFormat,
+        width: dimensions?.width ?? image.width,
+        height: dimensions?.height ?? image.height,
         errorMessage: null,
         finishedAt: new Date(),
         leaseToken: null,

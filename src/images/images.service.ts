@@ -9,8 +9,12 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, In, Repository } from 'typeorm';
 import { UsersService } from '../users/users.service';
-import { MinioService } from '../upload/minio.service';
-import { detectImageMetadata } from '../upload/image-format';
+import {
+  MAX_STORED_IMAGE_READ_BYTES,
+  MinioService,
+} from '../upload/minio.service';
+import { inspectDecodedImage } from '../upload/image-format';
+import { MAX_IMAGE_UPLOAD_TOTAL_BYTES } from '../upload/aggregate-memory-storage';
 import { AiService } from './ai.service';
 import type { AiLineId } from './ai.service';
 import type { ImageJobInputReference } from './generation-input';
@@ -98,8 +102,11 @@ export class ImagesService {
       input.referenceImageUrls || [],
       referenceImage,
     );
-    const referenceImageUrls = inputReferences.length
-      ? inputReferences.map((reference) => reference.url)
+    const imageReferences = inputReferences.filter(
+      (reference) => reference.kind === 'url' || reference.role !== 'mask',
+    );
+    const referenceImageUrls = imageReferences.length
+      ? imageReferences.map((reference) => reference.url)
       : null;
     const chargedCredits = user.role === 'admin' ? 0 : quantity;
     let requiresRefund = false;
@@ -148,7 +155,10 @@ export class ImagesService {
         images = await this.imagesRepository.save(jobs);
       }
 
-      this.generationWorker?.wake(images.map((image) => image.id));
+      this.generationWorker?.wake(
+        images.map((image) => image.id),
+        lineId,
+      );
       return { images, requestId, chargedCredits };
     } catch (error) {
       const cleanupTasks: Promise<unknown>[] = inputReferences
@@ -301,6 +311,18 @@ export class ImagesService {
       ...(referenceImage?.files || []),
       ...(referenceImage?.file ? [referenceImage.file] : []),
     ];
+    const mask = referenceImage?.mask;
+    let totalInputBytes = 0;
+    const addInputBytes = (size: number) => {
+      totalInputBytes += size;
+      if (totalInputBytes > MAX_IMAGE_UPLOAD_TOTAL_BYTES) {
+        throw new BadRequestException(
+          'Reference images and mask exceed the total upload size limit',
+        );
+      }
+    };
+    for (const file of files) addInputBytes(file.buffer.length);
+    if (mask) addInputBytes(mask.buffer.length);
     const urls = Array.from(
       new Set(
         [
@@ -317,6 +339,9 @@ export class ImagesService {
         'A maximum of 5 reference images is allowed',
       );
     }
+    if (mask && files.length + urls.length === 0) {
+      throw new BadRequestException('A mask requires a reference image');
+    }
 
     const references: ImageJobInputReference[] = [];
     const storedKeys: string[] = [];
@@ -325,7 +350,17 @@ export class ImagesService {
       for (const [index, url] of urls.entries()) {
         let source: Awaited<ReturnType<MinioService['readImageByUrl']>>;
         try {
-          source = await this.minioService.readImageByUrl(url);
+          const remainingBytes = MAX_IMAGE_UPLOAD_TOTAL_BYTES - totalInputBytes;
+          if (remainingBytes < 1) {
+            throw new BadRequestException(
+              'Reference images and mask exceed the total upload size limit',
+            );
+          }
+          source = await this.minioService.readImageByUrl(
+            url,
+            Math.min(remainingBytes, MAX_STORED_IMAGE_READ_BYTES),
+          );
+          addInputBytes(source.buffer.length);
         } catch (error: unknown) {
           const message =
             error instanceof Error ? error.message : String(error);
@@ -336,6 +371,11 @@ export class ImagesService {
           ) {
             throw new BadRequestException(
               'Reference image URL must point to an ArtGen image',
+            );
+          }
+          if (message.startsWith('Stored image exceeds the')) {
+            throw new BadRequestException(
+              'Reference images and mask exceed the total upload size limit',
             );
           }
           throw error;
@@ -355,17 +395,19 @@ export class ImagesService {
         const sourceSegments = source.key.split('/');
         references.push({
           kind: 'object',
+          role: 'image',
           key: stored.key,
           url: stored.url,
           mimeType: stored.mimeType,
           originalName:
             sourceSegments[sourceSegments.length - 1] ||
             `reference-${index + 1}.${extension}`,
+          size: source.buffer.length,
         });
       }
 
       for (const [index, file] of files.entries()) {
-        const metadata = detectImageMetadata(file.buffer);
+        const metadata = await inspectDecodedImage(file.buffer);
         if (!metadata) {
           throw new BadRequestException(
             'Reference images must be PNG, JPEG, or WebP files',
@@ -377,16 +419,44 @@ export class ImagesService {
           `${randomUUID().slice(0, 8)}.${metadata.imageFormat}`;
         const stored = await this.minioService.storeImage(file.buffer, userId, {
           key,
+          validatedImage: metadata,
         });
         storedKeys.push(stored.key);
         references.push({
           kind: 'object',
+          role: 'image',
           key: stored.key,
           url: stored.url,
           mimeType: stored.mimeType,
           originalName:
             file.originalname ||
             `reference-${position}.${metadata.imageFormat}`,
+          size: file.buffer.length,
+        });
+      }
+      if (mask) {
+        const metadata = await inspectDecodedImage(mask.buffer);
+        if (!metadata) {
+          throw new BadRequestException(
+            'Mask must be a PNG, JPEG, or WebP file',
+          );
+        }
+        const key =
+          `job-inputs/${userId}/${requestId}/mask-` +
+          `${randomUUID().slice(0, 8)}.${metadata.imageFormat}`;
+        const stored = await this.minioService.storeImage(mask.buffer, userId, {
+          key,
+          validatedImage: metadata,
+        });
+        storedKeys.push(stored.key);
+        references.push({
+          kind: 'object',
+          role: 'mask',
+          key: stored.key,
+          url: stored.url,
+          mimeType: stored.mimeType,
+          originalName: mask.originalname || `mask.${metadata.imageFormat}`,
+          size: mask.buffer.length,
         });
       }
       return references;

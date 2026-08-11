@@ -7,11 +7,19 @@ import { AiService } from './ai.service';
 import { ImageGenerationWorker } from './image-generation.worker';
 import { UsersModule } from '../users/users.module';
 import { UploadModule } from '../upload/upload.module';
+import { ImageGenerationThrottlerGuard } from './image-generation-throttler.guard';
+import { ImageUploadConcurrencyInterceptor } from './image-upload-concurrency.interceptor';
 
 @Module({
   imports: [TypeOrmModule.forFeature([Image]), UsersModule, UploadModule],
   controllers: [ImagesController],
-  providers: [ImagesService, AiService, ImageGenerationWorker],
+  providers: [
+    ImagesService,
+    AiService,
+    ImageGenerationWorker,
+    ImageGenerationThrottlerGuard,
+    ImageUploadConcurrencyInterceptor,
+  ],
   exports: [ImagesService],
 })
 export class ImagesModule {}

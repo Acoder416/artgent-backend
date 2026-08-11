@@ -33,24 +33,53 @@ describe('AiService prompt rewriting', () => {
       brief: 'Make a launch image for a premium camera',
       currentPrompt: 'A camera on a table',
       template: 'Product campaign',
+      lineId: 'line-b',
     });
 
     expect(prompt).toBe('A precise editorial photograph with soft side light.');
-    expect(post).toHaveBeenCalledWith(
-      'https://gateway.test/v1/chat/completions',
-      expect.objectContaining({
-        model: 'test-chat-model',
-        messages: expect.arrayContaining([
-          expect.objectContaining({ role: 'system' }),
-          expect.objectContaining({ role: 'user' }),
-        ]),
-      }),
-      expect.objectContaining({
-        headers: expect.objectContaining({
-          Authorization: 'Bearer test-key',
-        }),
+    const [url, payload, requestConfig] = post.mock.calls[0] as unknown as [
+      string,
+      { model?: string; messages?: Array<{ role?: string }> },
+      { headers?: Record<string, string> },
+    ];
+    expect(url).toBe('https://gateway.test/v1/chat/completions');
+    expect(payload.model).toBe('test-chat-model');
+    expect(payload.messages?.map((message) => message.role)).toEqual([
+      'system',
+      'user',
+    ]);
+    expect(requestConfig.headers?.Authorization).toBe('Bearer test-key');
+  });
+
+  it('uses line-a prompt rewriting while line-b inherits the global model', async () => {
+    const post = jest.spyOn(axios, 'post').mockResolvedValue({
+      data: {
+        choices: [{ message: { content: 'A rewritten prompt.' } }],
+      },
+    });
+    const service = new AiService(
+      new ConfigService({
+        AI_LINE_A_BASE_URL: 'https://gateway.test',
+        AI_LINE_B_BASE_URL: 'https://gateway.test',
+        SUB2API_KEY: 'test-key',
+        PROMPT_REWRITE_MODEL: 'global-chat-model',
       }),
     );
+
+    await service.rewritePrompt({
+      brief: 'Write an A-line prompt',
+      lineId: 'line-a',
+    });
+    await service.rewritePrompt({
+      brief: 'Write a B-line prompt',
+      lineId: 'line-b',
+    });
+
+    expect(
+      post.mock.calls.map(
+        ([, payload]) => (payload as { model?: string }).model,
+      ),
+    ).toEqual(['gpt-5-5', 'global-chat-model']);
   });
 
   it('does not fall back to fixed copy when the AI key is missing', async () => {

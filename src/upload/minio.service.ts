@@ -1,18 +1,22 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
 import * as Minio from 'minio';
 import {
-  detectImageMetadata,
+  inspectDecodedImage,
+  DecodedImage,
   ImageFormat,
   ImageMetadata,
   ImageMimeType,
 } from './image-format';
 
+export const MAX_STORED_IMAGE_READ_BYTES = 20 * 1024 * 1024;
+
 export interface StoreImageOptions {
   key?: string;
   folder?: string;
+  validatedImage?: DecodedImage;
 }
 
 export interface StoredImage {
@@ -63,8 +67,18 @@ export class MinioService implements OnModuleInit {
     userId: number,
     options: StoreImageOptions = {},
   ): Promise<StoredImage> {
-    const metadata = detectImageMetadata(imageBuffer);
-    if (!metadata) throw new Error('Unsupported image format');
+    const suppliedValidation = options.validatedImage;
+    const suppliedValidationMatches =
+      suppliedValidation?.sha256 ===
+      createHash('sha256').update(imageBuffer).digest('hex');
+    const decoded = suppliedValidationMatches
+      ? suppliedValidation
+      : await inspectDecodedImage(imageBuffer);
+    if (!decoded) throw new Error('Unsupported image format');
+    const metadata: ImageMetadata = {
+      mimeType: decoded.mimeType,
+      imageFormat: decoded.imageFormat,
+    };
 
     const key = options.key
       ? this.validateObjectKey(options.key)
@@ -95,23 +109,33 @@ export class MinioService implements OnModuleInit {
     return (await this.storeImage(imageBuffer, userId)).url;
   }
 
-  async readImage(key: string): Promise<Buffer> {
+  async readImage(
+    key: string,
+    maxBytes = MAX_STORED_IMAGE_READ_BYTES,
+  ): Promise<Buffer> {
     const stream = await this.minioClient.getObject(
       this.bucket,
       this.validateObjectKey(key),
     );
-    return this.readStream(stream);
+    return this.readStream(stream, maxBytes);
   }
 
-  async readImageByUrl(imageUrl: string): Promise<ReadStoredImage> {
+  async readImageByUrl(
+    imageUrl: string,
+    maxBytes = MAX_STORED_IMAGE_READ_BYTES,
+  ): Promise<ReadStoredImage> {
     const opened = await this.openImageByUrl(imageUrl);
+    if (opened.size > maxBytes) {
+      opened.stream.destroy();
+      throw new Error(`Stored image exceeds the ${maxBytes}-byte limit`);
+    }
     return {
       key: opened.key,
       url: opened.url,
       size: opened.size,
       mimeType: opened.mimeType,
       imageFormat: opened.imageFormat,
-      buffer: await this.readStream(opened.stream),
+      buffer: await this.readStream(opened.stream, maxBytes),
     };
   }
 
@@ -174,12 +198,26 @@ export class MinioService implements OnModuleInit {
     this.logger.log(`Image deleted: ${safeKey}`);
   }
 
-  private async readStream(stream: Readable): Promise<Buffer> {
-    const chunks: Buffer[] = [];
-    for await (const chunk of stream as AsyncIterable<Uint8Array | string>) {
-      chunks.push(Buffer.from(chunk));
+  private async readStream(
+    stream: Readable,
+    maxBytes: number,
+  ): Promise<Buffer> {
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) {
+      stream.destroy();
+      throw new Error('Stored image byte limit must be a positive integer');
     }
-    return Buffer.concat(chunks);
+    const chunks: Buffer[] = [];
+    let totalBytes = 0;
+    for await (const chunk of stream as AsyncIterable<Uint8Array | string>) {
+      const buffer = Buffer.from(chunk);
+      totalBytes += buffer.length;
+      if (totalBytes > maxBytes) {
+        stream.destroy();
+        throw new Error(`Stored image exceeds the ${maxBytes}-byte limit`);
+      }
+      chunks.push(buffer);
+    }
+    return Buffer.concat(chunks, totalBytes);
   }
 
   private createObjectKey(

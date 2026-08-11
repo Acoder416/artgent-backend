@@ -10,6 +10,11 @@ interface AiLineFileEntry {
   apiKeyEnv?: unknown;
   fallbackApiKeyEnv?: unknown;
   enabled?: unknown;
+  streamEnabled?: unknown;
+  promptRewriteModel?: unknown;
+  maxConcurrency?: unknown;
+  responseFormat?: unknown;
+  historyDisabled?: unknown;
 }
 
 interface AiLinesFile {
@@ -17,11 +22,18 @@ interface AiLinesFile {
   lines?: unknown;
 }
 
+export type AiLineResponseFormat = 'b64_json' | 'url';
+
 export interface AiLineConnection {
   id: string;
   name: string;
   baseUrl: string;
   apiKey: string;
+  streamEnabled: boolean;
+  promptRewriteModel: string;
+  maxConcurrency: number;
+  responseFormat?: AiLineResponseFormat;
+  historyDisabled?: boolean;
 }
 
 export interface AiLinesConfiguration {
@@ -34,13 +46,55 @@ interface LoadAiLinesOptions {
   configFile: string;
   getEnvironmentValue: (key: string) => string | undefined;
   defaultLineOverride?: string;
+  defaultStreamEnabled?: boolean;
+  defaultPromptRewriteModel?: string;
+  defaultMaxConcurrency?: number;
 }
+
+const DEFAULT_STREAM_ENABLED = true;
+const DEFAULT_PROMPT_REWRITE_MODEL = 'gpt-5.4-mini';
+const DEFAULT_MAX_CONCURRENCY = 10;
 
 function requireString(value: unknown, field: string): string {
   if (typeof value !== 'string' || !value.trim()) {
     throw new Error(`${field} must be a non-empty string`);
   }
   return value.trim();
+}
+
+function requireBoolean(
+  value: unknown,
+  field: string,
+  fallback: boolean,
+): boolean {
+  if (value === undefined) return fallback;
+  if (typeof value !== 'boolean') {
+    throw new Error(`${field} must be true or false`);
+  }
+  return value;
+}
+
+function requireMaxConcurrency(
+  value: unknown,
+  field: string,
+  fallback: number,
+): number {
+  if (value === undefined) return fallback;
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
+    throw new Error(`${field} must be a positive integer`);
+  }
+  return value;
+}
+
+function requireResponseFormat(
+  value: unknown,
+  field: string,
+): AiLineResponseFormat | undefined {
+  if (value === undefined) return undefined;
+  if (value !== 'b64_json' && value !== 'url') {
+    throw new Error(`${field} must be b64_json or url`);
+  }
+  return value;
 }
 
 function normalizeBaseUrl(value: string, lineId: string): string {
@@ -113,11 +167,46 @@ export function loadAiLinesConfiguration(
         (fallbackApiKeyEnv && options.getEnvironmentValue(fallbackApiKeyEnv)) ||
         '';
 
+      const streamEnabled = requireBoolean(
+        entry.streamEnabled,
+        `lines[${index}].streamEnabled`,
+        options.defaultStreamEnabled ?? DEFAULT_STREAM_ENABLED,
+      );
+      const promptRewriteModel =
+        entry.promptRewriteModel === undefined
+          ? options.defaultPromptRewriteModel || DEFAULT_PROMPT_REWRITE_MODEL
+          : requireString(
+              entry.promptRewriteModel,
+              `lines[${index}].promptRewriteModel`,
+            );
+      const maxConcurrency = requireMaxConcurrency(
+        entry.maxConcurrency,
+        `lines[${index}].maxConcurrency`,
+        options.defaultMaxConcurrency ?? DEFAULT_MAX_CONCURRENCY,
+      );
+      const responseFormat = requireResponseFormat(
+        entry.responseFormat,
+        `lines[${index}].responseFormat`,
+      );
+      const historyDisabled =
+        entry.historyDisabled === undefined
+          ? undefined
+          : requireBoolean(
+              entry.historyDisabled,
+              `lines[${index}].historyDisabled`,
+              false,
+            );
+
       return {
         id,
         name,
         baseUrl: normalizeBaseUrl(configuredBaseUrl, id),
         apiKey,
+        streamEnabled,
+        promptRewriteModel,
+        maxConcurrency,
+        ...(responseFormat === undefined ? {} : { responseFormat }),
+        ...(historyDisabled === undefined ? {} : { historyDisabled }),
       };
     });
 

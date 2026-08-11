@@ -2,6 +2,7 @@ import { DataSource, EntityManager, Repository } from 'typeorm';
 import { User } from '../users/user.entity';
 import { UsersService } from '../users/users.service';
 import { MinioService } from '../upload/minio.service';
+import { REAL_PNG_3X2 } from '../test/image-fixtures';
 import { AiService } from './ai.service';
 import { ImageGenerationWorker } from './image-generation.worker';
 import { Image } from './image.entity';
@@ -61,7 +62,7 @@ describe('ImagesService durable enqueue', () => {
       {
         files: [
           {
-            buffer: Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+            buffer: REAL_PNG_3X2,
             mimetype: 'image/png',
             originalname: 'product.png',
           },
@@ -80,17 +81,83 @@ describe('ImagesService durable enqueue', () => {
           kind: 'object',
           mimeType: 'image/png',
           originalName: 'product.png',
+          size: REAL_PNG_3X2.length,
         }),
       ],
     });
     expect(rows[0].referenceImageUrls).toEqual([
       expect.stringContaining('/job-inputs/4/'),
     ]);
-    expect(wake).toHaveBeenCalledWith(result.images.map((image) => image.id));
+    expect(wake).toHaveBeenCalledWith(
+      result.images.map((image) => image.id),
+      'line-a',
+    );
+  });
+
+  it('stages an uploaded mask without exposing it as a reference image URL', async () => {
+    const user = Object.assign(new User(), {
+      id: 14,
+      credits: 5,
+      totalCreditsSpent: 0,
+      role: 'user',
+    });
+    const rows: Image[] = [];
+    const imageRepository = {
+      create: (input: Partial<Image>) => Object.assign(new Image(), input),
+      save: jest.fn((images: Image[]) => {
+        images.forEach((image, index) => {
+          image.id = index + 1;
+          rows.push(image);
+        });
+        return Promise.resolve(images);
+      }),
+    } as unknown as Repository<Image>;
+    const storeImage = jest.fn(
+      (_buffer: Buffer, _userId: number, options: { key: string }) =>
+        Promise.resolve({
+          key: options.key,
+          url: `https://static.lzljz.top/artgen/${options.key}`,
+          imageFormat: 'png' as const,
+          mimeType: 'image/png' as const,
+        }),
+    );
+    const service = new ImagesService(
+      imageRepository,
+      {
+        findById: jest.fn().mockResolvedValue(user),
+        deductCredits: jest.fn().mockResolvedValue(user),
+      } as unknown as UsersService,
+      { resolveLineId: () => 'line-a' } as unknown as AiService,
+      { storeImage } as unknown as MinioService,
+    );
+    const reference = {
+      buffer: REAL_PNG_3X2,
+      mimetype: 'image/png',
+      originalname: 'reference.png',
+    };
+    const mask = {
+      buffer: REAL_PNG_3X2,
+      mimetype: 'image/png',
+      originalname: 'mask.png',
+    };
+
+    await service.generateBatch(
+      user.id,
+      { prompt: 'Replace only the masked area' },
+      { file: reference, mask },
+    );
+
+    expect(storeImage).toHaveBeenCalledTimes(2);
+    expect(rows[0].inputReferences).toEqual([
+      expect.objectContaining({ role: 'image', originalName: 'reference.png' }),
+      expect.objectContaining({ role: 'mask', originalName: 'mask.png' }),
+    ]);
+    expect(rows[0].referenceImageUrls).toHaveLength(1);
+    expect(rows[0].referenceImageUrls?.[0]).toContain('/job-inputs/14/');
   });
 
   it('copies an owned MinIO URL into durable job input storage', async () => {
-    const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+    const png = REAL_PNG_3X2;
     const sourceUrl = 'https://static.lzljz.top/artgen/images/4/existing.png';
     const user = Object.assign(new User(), {
       id: 4,
@@ -145,7 +212,7 @@ describe('ImagesService durable enqueue', () => {
       referenceImageUrls: [sourceUrl],
     });
 
-    expect(readImageByUrl).toHaveBeenCalledWith(sourceUrl);
+    expect(readImageByUrl).toHaveBeenCalledWith(sourceUrl, 20 * 1024 * 1024);
     expect(storeImage).toHaveBeenCalledTimes(1);
     const [stagedBuffer, stagedUserId, stagedOptions] =
       storeImage.mock.calls[0];
@@ -201,7 +268,7 @@ describe('ImagesService durable enqueue', () => {
   });
 
   it('limits uploaded files and URL references to five images in total', async () => {
-    const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+    const png = REAL_PNG_3X2;
     const storeImage = jest.fn();
     const readImageByUrl = jest.fn();
     const service = new ImagesService(
@@ -290,7 +357,7 @@ describe('ImagesService durable enqueue', () => {
         { prompt: 'A product photo', quantity: 2 },
         {
           file: {
-            buffer: Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
+            buffer: REAL_PNG_3X2,
             mimetype: 'image/png',
             originalname: 'reference.png',
           },
@@ -364,6 +431,6 @@ describe('ImagesService durable enqueue', () => {
     );
     expect(save).toHaveBeenCalledWith(Image, expect.any(Array));
     expect(deductCredits).not.toHaveBeenCalled();
-    expect(wake).toHaveBeenCalledWith([1, 2]);
+    expect(wake).toHaveBeenCalledWith([1, 2], 'line-a');
   });
 });

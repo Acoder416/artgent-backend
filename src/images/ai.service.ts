@@ -8,9 +8,13 @@ import {
 import { ConfigService } from '@nestjs/config';
 import axios, { type AxiosResponse } from 'axios';
 import { createParser } from 'eventsource-parser';
+import { lookup as dnsLookup } from 'node:dns/promises';
+import { Agent as HttpAgent } from 'node:http';
+import { Agent as HttpsAgent } from 'node:https';
+import { isIPv4, isIPv6, type LookupFunction } from 'node:net';
 import { Readable } from 'node:stream';
 import {
-  detectImageMetadata,
+  inspectDecodedImage,
   ImageFormat,
   ImageMimeType,
 } from '../upload/image-format';
@@ -25,6 +29,9 @@ export type GenerateImageResult =
       imageBuffer: Buffer;
       mimeType: ImageMimeType;
       imageFormat: ImageFormat;
+      width: number;
+      height: number;
+      sha256: string;
       error?: never;
     }
   | {
@@ -104,16 +111,131 @@ const fallbackImageModels = [
   'gpt-image-2',
 ];
 const IMAGE_PARTIAL_IMAGES = 0;
+const MAX_PROVIDER_RESPONSE_BYTES = 40 * 1024 * 1024;
+const MAX_PROVIDER_IMAGE_BYTES = 20 * 1024 * 1024;
+const MAX_PROVIDER_IMAGE_BASE64_LENGTH =
+  Math.ceil((MAX_PROVIDER_IMAGE_BYTES * 4) / 3) + 4;
+const DEFAULT_IMAGE_STREAM_ENABLED = true;
+const DEFAULT_PROMPT_REWRITE_MODEL = 'gpt-5.4-mini';
+const DEFAULT_IMAGE_WORKER_CONCURRENCY = 10;
+const MAX_GENERATED_IMAGE_REDIRECTS = 3;
+
+interface GeneratedImageTarget {
+  url: string;
+  httpAgent?: HttpAgent;
+  httpsAgent?: HttpsAgent;
+}
+
+function isPublicIpv4(address: string): boolean {
+  const octets = address.split('.').map(Number);
+  if (
+    octets.length !== 4 ||
+    octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)
+  ) {
+    return false;
+  }
+  const [a, b, c] = octets;
+  return !(
+    a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    (a === 100 && b >= 64 && b <= 127) ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 0 && c === 0) ||
+    (a === 192 && b === 0 && c === 2) ||
+    (a === 192 && b === 168) ||
+    (a === 198 && (b === 18 || b === 19)) ||
+    (a === 198 && b === 51 && c === 100) ||
+    (a === 203 && b === 0 && c === 113) ||
+    a >= 224
+  );
+}
+
+function isPublicIpv6(address: string): boolean {
+  const normalized = address.toLowerCase().split('%', 1)[0];
+  const mappedIpv4 = normalized.match(/^(?:::ffff:)(\d+\.\d+\.\d+\.\d+)$/);
+  if (mappedIpv4) return isPublicIpv4(mappedIpv4[1]);
+  const firstGroup = Number.parseInt(normalized.split(':', 1)[0] || '0', 16);
+  return (
+    firstGroup >= 0x2000 &&
+    firstGroup <= 0x3fff &&
+    !normalized.startsWith('2001:db8:')
+  );
+}
+
+function isPublicIpAddress(address: string): boolean {
+  if (isIPv4(address)) return isPublicIpv4(address);
+  if (isIPv6(address)) return isPublicIpv6(address);
+  return false;
+}
+
+function parseStrictBoolean(value: unknown, key: string): boolean {
+  if (typeof value === 'boolean') return value;
+  if (typeof value !== 'string') {
+    throw new Error(`${key} must be true or false`);
+  }
+
+  const normalized = value.trim().toLowerCase();
+  const enabledValues = ['1', 'true', 'on', 'yes'];
+  const disabledValues = ['0', 'false', 'off', 'no'];
+  if (
+    !enabledValues.includes(normalized) &&
+    !disabledValues.includes(normalized)
+  ) {
+    throw new Error(`${key} must be true or false`);
+  }
+  return enabledValues.includes(normalized);
+}
+
+function parseNonEmptyString(value: unknown, key: string): string {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new Error(`${key} must be a non-empty string`);
+  }
+  return value.trim();
+}
+
+function parsePositiveInteger(value: unknown, key: string): number {
+  const parsed =
+    typeof value === 'number'
+      ? value
+      : typeof value === 'string'
+        ? Number(value.trim())
+        : Number.NaN;
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new Error(`${key} must be a positive integer`);
+  }
+  return parsed;
+}
 
 @Injectable()
 export class AiService {
   private readonly logger = new Logger(AiService.name);
   private readonly connections: Map<AiLineId, AiLineConnection>;
   private readonly defaultLineId: AiLineId;
-  private readonly promptRewriteModel: string;
-  private readonly imageStreamEnabled: boolean;
 
   constructor(private configService: ConfigService) {
+    const defaultStreamEnabled = parseStrictBoolean(
+      this.configService.get<string | boolean>(
+        'IMAGE_STREAM_ENABLED',
+        DEFAULT_IMAGE_STREAM_ENABLED,
+      ),
+      'IMAGE_STREAM_ENABLED',
+    );
+    const defaultPromptRewriteModel = parseNonEmptyString(
+      this.configService.get<unknown>(
+        'PROMPT_REWRITE_MODEL',
+        DEFAULT_PROMPT_REWRITE_MODEL,
+      ),
+      'PROMPT_REWRITE_MODEL',
+    );
+    const defaultMaxConcurrency = parsePositiveInteger(
+      this.configService.get<unknown>(
+        'IMAGE_WORKER_CONCURRENCY',
+        DEFAULT_IMAGE_WORKER_CONCURRENCY,
+      ),
+      'IMAGE_WORKER_CONCURRENCY',
+    );
     const configuration = loadAiLinesConfiguration({
       projectDir: process.cwd(),
       configFile: this.configService.get<string>(
@@ -122,33 +244,15 @@ export class AiService {
       ),
       getEnvironmentValue: (key) => this.configService.get<string>(key),
       defaultLineOverride: this.configService.get<string>('AI_DEFAULT_LINE'),
+      defaultStreamEnabled,
+      defaultPromptRewriteModel,
+      defaultMaxConcurrency,
     });
     this.defaultLineId = configuration.defaultLineId;
     this.connections = new Map(
       configuration.lines.map((connection) => [connection.id, connection]),
     );
-    this.promptRewriteModel = this.configService.get(
-      'PROMPT_REWRITE_MODEL',
-      'gpt-5.4-mini',
-    );
-    const streamEnabled = this.configService.get<string | boolean>(
-      'IMAGE_STREAM_ENABLED',
-      true,
-    );
-    if (typeof streamEnabled === 'boolean') {
-      this.imageStreamEnabled = streamEnabled;
-    } else {
-      const normalizedStreamEnabled = streamEnabled.trim().toLowerCase();
-      const enabledValues = ['1', 'true', 'on', 'yes'];
-      const disabledValues = ['0', 'false', 'off', 'no'];
-      if (
-        !enabledValues.includes(normalizedStreamEnabled) &&
-        !disabledValues.includes(normalizedStreamEnabled)
-      ) {
-        throw new Error('IMAGE_STREAM_ENABLED must be true or false');
-      }
-      this.imageStreamEnabled = enabledValues.includes(normalizedStreamEnabled);
-    }
+
     const configuredPartialImages = Number(
       this.configService.get<string | number>(
         'IMAGE_PARTIAL_IMAGES',
@@ -174,6 +278,10 @@ export class AiService {
 
   resolveLineId(lineId?: AiLineId): AiLineId {
     return this.resolveConnection(lineId).id;
+  }
+
+  getLineMaxConcurrency(lineId?: AiLineId): number {
+    return this.resolveConnection(lineId).maxConcurrency;
   }
 
   async listImageModels(lineId?: AiLineId): Promise<string[]> {
@@ -222,6 +330,9 @@ export class AiService {
 
     try {
       const connection = this.resolveConnection(lineId);
+      if (referenceImage?.mask && referenceCount === 0) {
+        throw new BadRequestException('A mask requires a reference image');
+      }
       this.logger.log(
         `Generating image: line=${connection.id}, model=${model}, size=${size}, mode=${
           referenceCount > 0 ? 'edit' : 'generation'
@@ -280,7 +391,7 @@ export class AiService {
       const response = await axios.post<OpenAIChatResponse>(
         `${connection.baseUrl}/v1/chat/completions`,
         {
-          model: this.promptRewriteModel,
+          model: connection.promptRewriteModel,
           messages: [
             {
               role: 'system',
@@ -336,21 +447,31 @@ export class AiService {
         n: 1,
         size,
         quality,
-        ...(this.imageStreamEnabled
+        ...(connection.streamEnabled
           ? {
               stream: true,
               partial_images: IMAGE_PARTIAL_IMAGES,
             }
-          : {}),
+          : {
+              ...(connection.responseFormat === undefined
+                ? {}
+                : { response_format: connection.responseFormat }),
+              ...(connection.historyDisabled === undefined
+                ? {}
+                : { history_disabled: connection.historyDisabled }),
+            }),
       },
       {
         headers: {
           Authorization: `Bearer ${connection.apiKey}`,
           'Content-Type': 'application/json',
-          ...(this.imageStreamEnabled ? { Accept: 'text/event-stream' } : {}),
+          ...(connection.streamEnabled ? { Accept: 'text/event-stream' } : {}),
         },
         timeout: 1200000,
-        ...(this.imageStreamEnabled ? { responseType: 'stream' as const } : {}),
+        maxContentLength: MAX_PROVIDER_RESPONSE_BYTES,
+        ...(connection.streamEnabled
+          ? { responseType: 'stream' as const }
+          : {}),
       },
     );
   }
@@ -387,9 +508,16 @@ export class AiService {
     formData.append('n', '1');
     formData.append('size', size);
     formData.append('quality', quality);
-    if (this.imageStreamEnabled) {
+    if (connection.streamEnabled) {
       formData.append('stream', 'true');
       formData.append('partial_images', String(IMAGE_PARTIAL_IMAGES));
+    } else {
+      if (connection.responseFormat !== undefined) {
+        formData.append('response_format', connection.responseFormat);
+      }
+      if (connection.historyDisabled !== undefined) {
+        formData.append('history_disabled', String(connection.historyDisabled));
+      }
     }
     files.forEach((file, index) => {
       formData.append(
@@ -398,6 +526,13 @@ export class AiService {
         file.originalname || `reference-${index + 1}.png`,
       );
     });
+    if (referenceImage.mask) {
+      formData.append(
+        'mask',
+        this.fileToBlob(referenceImage.mask),
+        referenceImage.mask.originalname || 'mask.png',
+      );
+    }
 
     return axios.post<OpenAIImageResponse | Readable>(
       `${connection.baseUrl}/v1/images/edits`,
@@ -405,22 +540,26 @@ export class AiService {
       {
         headers: {
           Authorization: `Bearer ${connection.apiKey}`,
-          ...(this.imageStreamEnabled ? { Accept: 'text/event-stream' } : {}),
+          ...(connection.streamEnabled ? { Accept: 'text/event-stream' } : {}),
         },
         timeout: 1200000,
-        ...(this.imageStreamEnabled ? { responseType: 'stream' as const } : {}),
+        maxContentLength: MAX_PROVIDER_RESPONSE_BYTES,
+        ...(connection.streamEnabled
+          ? { responseType: 'stream' as const }
+          : {}),
       },
     );
   }
 
   private fileToBlob(file: UploadedImageFile): Blob {
     const imageBuffer = file.buffer;
-    const imageArrayBuffer = imageBuffer.buffer.slice(
+    const imageBytes = new Uint8Array(
+      imageBuffer.buffer as ArrayBuffer,
       imageBuffer.byteOffset,
-      imageBuffer.byteOffset + imageBuffer.byteLength,
-    ) as ArrayBuffer;
+      imageBuffer.byteLength,
+    );
 
-    return new Blob([imageArrayBuffer], {
+    return new Blob([imageBytes], {
       type: file.mimetype || 'application/octet-stream',
     });
   }
@@ -487,9 +626,9 @@ export class AiService {
         ? chunk
         : Buffer.from(String(chunk));
       byteLength += buffer.byteLength;
-      if (byteLength > 128 * 1024 * 1024) {
+      if (byteLength > MAX_PROVIDER_RESPONSE_BYTES) {
         stream.destroy();
-        throw new Error('Image generation API response exceeded 128 MB');
+        throw new Error('Image generation API response exceeded 40 MB');
       }
       chunks.push(buffer);
     }
@@ -549,13 +688,22 @@ export class AiService {
           true,
         );
       },
-      maxBufferSize: 128 * 1024 * 1024,
+      maxBufferSize: MAX_PROVIDER_RESPONSE_BYTES,
     });
 
     stream.setEncoding('utf8');
+    let streamedBytes = 0;
     try {
       for await (const chunk of stream) {
-        parser.feed(String(chunk));
+        const text = String(chunk);
+        streamedBytes += Buffer.byteLength(text);
+        if (streamedBytes > MAX_PROVIDER_RESPONSE_BYTES) {
+          throw new ImageStreamError(
+            'Image generation stream exceeded 40 MB',
+            false,
+          );
+        }
+        parser.feed(text);
         if (completedResponse) {
           stream.destroy();
           return await this.extractImageBuffer(completedResponse, connection);
@@ -577,7 +725,11 @@ export class AiService {
 
   private decodeBase64Image(value: string): Buffer | undefined {
     const normalized = value.replace(/\s/g, '');
-    if (!normalized || !/^[A-Za-z0-9+/]*={0,2}$/.test(normalized)) {
+    if (
+      !normalized ||
+      normalized.length > MAX_PROVIDER_IMAGE_BASE64_LENGTH ||
+      !/^[A-Za-z0-9+/]*={0,2}$/.test(normalized)
+    ) {
       return undefined;
     }
 
@@ -598,9 +750,11 @@ export class AiService {
     return imageBuffer;
   }
 
-  private createGeneratedImageResult(imageBuffer: Buffer): GenerateImageResult {
-    const metadata = detectImageMetadata(imageBuffer);
-    if (!metadata) {
+  private async createGeneratedImageResult(
+    imageBuffer: Buffer,
+  ): Promise<GenerateImageResult> {
+    const image = await inspectDecodedImage(imageBuffer);
+    if (!image) {
       return {
         success: false,
         error: 'Image generation API returned an unsupported image format',
@@ -611,7 +765,7 @@ export class AiService {
     return {
       success: true,
       imageBuffer,
-      ...metadata,
+      ...image,
     };
   }
 
@@ -629,17 +783,10 @@ export class AiService {
     connection: AiLineConnection,
   ) {
     const attempts = 4;
-    const headers = this.isSameOrigin(imageUrl, connection.baseUrl)
-      ? { Authorization: `Bearer ${connection.apiKey}` }
-      : undefined;
 
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
       try {
-        return await axios.get<ArrayBuffer>(imageUrl, {
-          responseType: 'arraybuffer',
-          headers,
-          timeout: 120000,
-        });
+        return await this.downloadGeneratedImageOnce(imageUrl, connection);
       } catch (error: unknown) {
         if (attempt === attempts || !this.isRetryableProviderError(error)) {
           throw error;
@@ -654,6 +801,103 @@ export class AiService {
     }
 
     throw new Error('Generated image download failed');
+  }
+
+  private async downloadGeneratedImageOnce(
+    imageUrl: string,
+    connection: AiLineConnection,
+  ): Promise<AxiosResponse<ArrayBuffer>> {
+    let currentUrl = imageUrl;
+    for (
+      let redirectCount = 0;
+      redirectCount <= MAX_GENERATED_IMAGE_REDIRECTS;
+      redirectCount += 1
+    ) {
+      const target = await this.resolveGeneratedImageTarget(
+        currentUrl,
+        connection,
+      );
+      const headers = this.isSameOrigin(target.url, connection.baseUrl)
+        ? { Authorization: `Bearer ${connection.apiKey}` }
+        : undefined;
+      const response = await axios.get<ArrayBuffer>(target.url, {
+        responseType: 'arraybuffer',
+        headers,
+        timeout: 120000,
+        maxContentLength: MAX_PROVIDER_IMAGE_BYTES,
+        maxRedirects: 0,
+        validateStatus: (status) => status >= 200 && status < 400,
+        ...(target.httpAgent ? { httpAgent: target.httpAgent } : {}),
+        ...(target.httpsAgent ? { httpsAgent: target.httpsAgent } : {}),
+      });
+      const status = response.status ?? 200;
+      if (![301, 302, 303, 307, 308].includes(status)) return response;
+      const locationHeader: unknown = response.headers?.location;
+      if (typeof locationHeader !== 'string' || !locationHeader) {
+        throw new Error('Generated image redirect did not include a location');
+      }
+      if (redirectCount === MAX_GENERATED_IMAGE_REDIRECTS) {
+        throw new Error('Generated image download exceeded redirect limit');
+      }
+      currentUrl = new URL(locationHeader, target.url).toString();
+    }
+
+    throw new Error('Generated image download exceeded redirect limit');
+  }
+
+  private async resolveGeneratedImageTarget(
+    imageUrl: string,
+    connection: AiLineConnection,
+  ): Promise<GeneratedImageTarget> {
+    let parsed: URL;
+    try {
+      parsed = new URL(imageUrl);
+    } catch {
+      throw new Error('Unsafe generated image URL');
+    }
+    if (
+      !['http:', 'https:'].includes(parsed.protocol) ||
+      parsed.username ||
+      parsed.password
+    ) {
+      throw new Error('Unsafe generated image URL');
+    }
+
+    if (this.isSameOrigin(parsed.toString(), connection.baseUrl)) {
+      return { url: parsed.toString() };
+    }
+
+    const hostname = parsed.hostname.replace(/^\[|\]$/g, '');
+    if (
+      hostname === 'localhost' ||
+      hostname.endsWith('.localhost') ||
+      hostname.endsWith('.local')
+    ) {
+      throw new Error('Unsafe generated image URL');
+    }
+
+    const literalFamily = isIPv4(hostname) ? 4 : isIPv6(hostname) ? 6 : 0;
+    const addresses = literalFamily
+      ? [{ address: hostname, family: literalFamily }]
+      : await dnsLookup(hostname, { all: true, verbatim: true });
+    if (
+      addresses.length === 0 ||
+      addresses.some((entry) => !isPublicIpAddress(entry.address))
+    ) {
+      throw new Error('Unsafe generated image URL');
+    }
+
+    const selected = addresses[0];
+    const pinnedLookup: LookupFunction = (_hostname, options, callback) => {
+      if (options.all) callback(null, [selected]);
+      else callback(null, selected.address, selected.family);
+    };
+    return {
+      url: parsed.toString(),
+      ...(parsed.protocol === 'https:'
+        ? { httpsAgent: new HttpsAgent({ lookup: pinnedLookup }) }
+        : { httpAgent: new HttpAgent({ lookup: pinnedLookup }) }),
+    };
   }
 
   private isSameOrigin(url: string, baseUrl: string): boolean {

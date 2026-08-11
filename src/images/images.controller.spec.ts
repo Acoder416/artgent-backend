@@ -28,7 +28,7 @@ describe('ImagesController generation parameters', () => {
       n: 3,
     });
 
-    await controller.generate({ user: { id: 7 } }, dto, []);
+    await controller.generate({ user: { id: 7 } }, dto, { images: [] });
 
     expect(generateBatch).toHaveBeenCalledWith(
       7,
@@ -39,6 +39,33 @@ describe('ImagesController generation parameters', () => {
         quantity: 3,
       }),
       { files: [], urls: [] },
+    );
+  });
+
+  it('forwards an uploaded mask separately from reference images', async () => {
+    const dto = Object.assign(new CreateImageDto(), {
+      prompt: 'Replace only the masked area',
+    });
+    const image = {
+      buffer: Buffer.from('image'),
+      mimetype: 'image/png',
+      originalname: 'reference.png',
+    };
+    const mask = {
+      buffer: Buffer.from('mask'),
+      mimetype: 'image/png',
+      originalname: 'mask.png',
+    };
+
+    await controller.generate({ user: { id: 7 } }, dto, {
+      images: [image],
+      mask: [mask],
+    });
+
+    expect(generateBatch).toHaveBeenCalledWith(
+      7,
+      expect.objectContaining({ prompt: dto.prompt }),
+      { files: [image], urls: [], mask },
     );
   });
 
@@ -54,9 +81,9 @@ describe('ImagesController generation parameters', () => {
       ...values,
     });
 
-    expect(() => controller.generate({ user: { id: 7 } }, dto, [])).toThrow(
-      new BadRequestException(message),
-    );
+    expect(() =>
+      controller.generate({ user: { id: 7 } }, dto, { images: [] }),
+    ).toThrow(new BadRequestException(message));
     expect(generateBatch).not.toHaveBeenCalled();
   });
 });

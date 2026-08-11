@@ -2,14 +2,19 @@ import { ConfigService } from '@nestjs/config';
 import { Repository } from 'typeorm';
 import { UsersService } from '../users/users.service';
 import { MinioService } from '../upload/minio.service';
+import { REAL_PNG_3X2 } from '../test/image-fixtures';
 import { AiService } from './ai.service';
 import { ImageGenerationWorker } from './image-generation.worker';
 import { Image } from './image.entity';
 
-async function waitUntil(predicate: () => boolean): Promise<void> {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+async function waitUntil(
+  predicate: () => boolean,
+  timeoutMs = 2_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
     if (predicate()) return;
-    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => setTimeout(resolve, 5));
   }
   throw new Error('Condition was not reached');
 }
@@ -46,6 +51,11 @@ interface WorkerInternals {
       mimetype?: string;
       originalname?: string;
     }>;
+    mask?: {
+      buffer: Buffer;
+      mimetype?: string;
+      originalname?: string;
+    };
     urls?: string[];
   }>;
   cleanupInputObjectsAfterTerminal(image: Image): Promise<void>;
@@ -124,6 +134,34 @@ describe('ImageGenerationWorker concurrency', () => {
     );
 
     expect((worker as unknown as { concurrency: number }).concurrency).toBe(10);
+  });
+
+  it('accounts for both source buffers and multipart Blob copies', () => {
+    const worker = new ImageGenerationWorker(
+      {} as Repository<Image>,
+      {} as AiService,
+      {} as MinioService,
+      {} as UsersService,
+      new ConfigService(),
+    );
+    const estimatedInputBytes = (
+      worker as unknown as {
+        estimatedInputBytes: (
+          references: NonNullable<Image['inputReferences']>,
+        ) => number;
+      }
+    ).estimatedInputBytes([
+      {
+        kind: 'object',
+        key: 'job-inputs/7/request/reference.png',
+        url: 'https://static.example.com/reference.png',
+        mimeType: 'image/png',
+        originalName: 'reference.png',
+        size: 1024,
+      },
+    ]);
+
+    expect(estimatedInputBytes).toBe(2048);
   });
 
   it('never exceeds the configured provider concurrency', async () => {
@@ -276,6 +314,8 @@ describe('ImageGenerationWorker concurrency', () => {
       imageBuffer: Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),
       imageFormat: 'png',
       mimeType: 'image/png',
+      width: 3,
+      height: 2,
     });
     const ai = {
       generateImage,
@@ -315,8 +355,11 @@ describe('ImageGenerationWorker concurrency', () => {
     await waitUntil(() => row.status === 'completed');
 
     expect(row.attemptCount).toBe(2);
+    expect(row.width).toBe(3);
+    expect(row.height).toBe(2);
     expect(readImage).toHaveBeenCalledWith(
       'job-inputs/7/request-1/reference.png',
+      20 * 1024 * 1024,
     );
     expect(generateImage).toHaveBeenCalledWith(
       row.prompt,
@@ -360,7 +403,7 @@ describe('ImageGenerationWorker concurrency', () => {
       { kind: 'url', url: sourceUrl },
     ]);
 
-    expect(readImageByUrl).toHaveBeenCalledWith(sourceUrl);
+    expect(readImageByUrl).toHaveBeenCalledWith(sourceUrl, 20 * 1024 * 1024);
     expect(referenceImage).toEqual({
       files: [
         {
@@ -370,6 +413,50 @@ describe('ImageGenerationWorker concurrency', () => {
         },
       ],
     });
+  });
+
+  it('restores a staged mask separately from reference image files', async () => {
+    const reference = REAL_PNG_3X2;
+    const mask = Buffer.from(REAL_PNG_3X2);
+    const readImage = jest.fn((key: string) =>
+      Promise.resolve(key.endsWith('mask.png') ? mask : reference),
+    );
+    const worker = new ImageGenerationWorker(
+      {} as Repository<Image>,
+      {} as AiService,
+      { readImage } as unknown as MinioService,
+      {} as UsersService,
+      new ConfigService(),
+    );
+
+    const restored = await internals(worker).loadReferenceImage([
+      {
+        kind: 'object',
+        role: 'image',
+        key: 'job-inputs/7/request-1/reference.png',
+        url: 'https://static.example.com/reference.png',
+        mimeType: 'image/png',
+        originalName: 'reference.png',
+      },
+      {
+        kind: 'object',
+        role: 'mask',
+        key: 'job-inputs/7/request-1/mask.png',
+        url: 'https://static.example.com/mask.png',
+        mimeType: 'image/png',
+        originalName: 'mask.png',
+      },
+    ]);
+
+    expect(restored.files).toEqual([
+      expect.objectContaining({
+        buffer: reference,
+        originalname: 'reference.png',
+      }),
+    ]);
+    expect(restored.mask).toEqual(
+      expect.objectContaining({ buffer: mask, originalname: 'mask.png' }),
+    );
   });
 
   it('does not upload after losing the lease while reserving the output key', async () => {
@@ -495,6 +582,7 @@ describe('ImageGenerationWorker concurrency', () => {
       { generateImage } as unknown as AiService,
       {
         statImage,
+        readImage: jest.fn().mockResolvedValue(REAL_PNG_3X2),
         storeImage: jest.fn(),
         deleteImage: jest.fn(),
       } as unknown as MinioService,
@@ -510,6 +598,8 @@ describe('ImageGenerationWorker concurrency', () => {
     expect(statImage.mock.calls[0][0]).toBe(persistedKey);
     expect(generateImage).not.toHaveBeenCalled();
     expect(row.imageKey).toBe(persistedKey);
+    expect(row.width).toBe(3);
+    expect(row.height).toBe(2);
   });
 
   it('cleans staged input objects after the last job completes', async () => {

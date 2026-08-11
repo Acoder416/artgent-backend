@@ -1,10 +1,16 @@
 import { ConfigService } from '@nestjs/config';
 import { Readable } from 'node:stream';
+import {
+  REAL_JPEG_3X2,
+  REAL_PNG_3X2,
+  REAL_WEBP_3X2,
+} from '../test/image-fixtures';
+import * as imageFormat from './image-format';
 import { MinioService, StoredImageObject } from './minio.service';
 
-const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xdb]);
-const WEBP = Buffer.from('524946460000000057454250', 'hex');
+const PNG = REAL_PNG_3X2;
+const JPEG = REAL_JPEG_3X2;
+const WEBP = REAL_WEBP_3X2;
 
 interface FakeMinioClient {
   putObject: jest.Mock;
@@ -91,6 +97,20 @@ describe('MinioService image storage', () => {
     ).rejects.toThrow('Unsupported image format');
     expect(client.putObject).not.toHaveBeenCalled();
   });
+
+  it('does not decode pixels twice when the same buffer carries validated metadata', async () => {
+    const { service } = createHarness();
+    const validatedImage = await imageFormat.inspectDecodedImage(PNG);
+    expect(validatedImage).not.toBeNull();
+    const inspect = jest.spyOn(imageFormat, 'inspectDecodedImage');
+
+    await service.storeImage(PNG, 7, {
+      key: 'images/7/validated.png',
+      validatedImage: validatedImage!,
+    });
+
+    expect(inspect).not.toHaveBeenCalled();
+  });
 });
 
 describe('MinioService stored image recovery', () => {
@@ -104,6 +124,18 @@ describe('MinioService stored image recovery', () => {
     await expect(
       service.readImage('job-inputs/7/reference.png'),
     ).resolves.toEqual(Buffer.from('first-second'));
+  });
+
+  it('rejects an object stream before it exceeds the caller byte budget', async () => {
+    const { service } = createHarness({
+      getObject: jest
+        .fn()
+        .mockResolvedValue(Readable.from([Buffer.alloc(4), Buffer.alloc(4)])),
+    });
+
+    await expect(
+      service.readImage('job-inputs/7/oversized.png', 7),
+    ).rejects.toThrow('exceeds the 7-byte limit');
   });
 
   it('returns stored object metadata by key', async () => {

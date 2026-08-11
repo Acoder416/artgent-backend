@@ -1,6 +1,13 @@
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
+import { REAL_PNG_3X2 } from '../test/image-fixtures';
 import { AiService } from './ai.service';
+
+jest.mock('node:dns/promises', () => ({
+  lookup: jest
+    .fn()
+    .mockResolvedValue([{ address: '93.184.216.34', family: 4 }]),
+}));
 
 describe('AiService cross-origin image URL download', () => {
   afterEach(() => {
@@ -8,7 +15,7 @@ describe('AiService cross-origin image URL download', () => {
   });
 
   it('does not expose line credentials to an external image host', async () => {
-    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const png = REAL_PNG_3X2;
     jest.spyOn(axios, 'post').mockResolvedValue({
       data: { data: [{ url: 'https://cdn.test/result.png' }] },
     });

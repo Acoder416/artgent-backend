@@ -1,6 +1,13 @@
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
+import { REAL_PNG_3X2 } from '../test/image-fixtures';
 import { AiService } from './ai.service';
+
+jest.mock('node:dns/promises', () => ({
+  lookup: jest
+    .fn()
+    .mockResolvedValue([{ address: '93.184.216.34', family: 4 }]),
+}));
 
 describe('AiService image URL download', () => {
   afterEach(() => {
@@ -8,7 +15,7 @@ describe('AiService image URL download', () => {
   });
 
   it('retries a transient TLS disconnect returned by the image gateway', async () => {
-    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const png = REAL_PNG_3X2;
     jest.spyOn(axios, 'post').mockResolvedValue({
       data: {
         data: [
@@ -50,5 +57,11 @@ describe('AiService image URL download', () => {
       imageFormat: 'png',
     });
     expect(get).toHaveBeenCalledTimes(2);
+    for (const [, config] of get.mock.calls) {
+      expect(config).toMatchObject({
+        responseType: 'arraybuffer',
+        maxContentLength: 20 * 1024 * 1024,
+      });
+    }
   });
 });

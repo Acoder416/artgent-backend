@@ -11,7 +11,7 @@ describe('ImagesService downloads', () => {
     id: 42,
     userId: 7,
     imageUrl: 'https://static.example.com/images/7/result.png',
-    imageKey: null,
+    imageKey: null as string | null,
   });
   const repository = {
     findOne: jest.fn().mockResolvedValue(image),

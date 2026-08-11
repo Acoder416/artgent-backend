@@ -1,5 +1,6 @@
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
+import { REAL_PNG_3X2 } from '../test/image-fixtures';
 import { AiService } from './ai.service';
 
 describe('AiService protected image URL download', () => {
@@ -8,7 +9,7 @@ describe('AiService protected image URL download', () => {
   });
 
   it('forwards the selected line credentials to the image download', async () => {
-    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    const png = REAL_PNG_3X2;
     jest.spyOn(axios, 'post').mockResolvedValue({
       data: {
         data: [

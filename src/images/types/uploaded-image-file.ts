@@ -7,6 +7,12 @@ export interface UploadedImageFile {
 export interface ReferenceImage {
   file?: UploadedImageFile;
   files?: UploadedImageFile[];
+  mask?: UploadedImageFile;
   url?: string;
   urls?: string[];
+}
+
+export interface UploadedGenerationFiles {
+  images?: UploadedImageFile[];
+  mask?: UploadedImageFile[];
 }

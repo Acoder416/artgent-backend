@@ -6,14 +6,20 @@
       "name": "线路 A",
       "baseUrlEnv": "AI_LINE_A_BASE_URL",
       "apiKeyEnv": "AI_LINE_A_API_KEY",
-      "fallbackApiKeyEnv": "SUB2API_KEY"
+      "fallbackApiKeyEnv": "SUB2API_KEY",
+      "streamEnabled": false,
+      "promptRewriteModel": "gpt-5-5",
+      "maxConcurrency": 3,
+      "responseFormat": "b64_json",
+      "historyDisabled": true
     },
     {
       "id": "line-b",
       "name": "线路 B",
       "baseUrlEnv": "AI_LINE_B_BASE_URL",
       "apiKeyEnv": "AI_LINE_B_API_KEY",
-      "fallbackApiKeyEnv": "SUB2API_KEY"
+      "fallbackApiKeyEnv": "SUB2API_KEY",
+      "streamEnabled": true
     }
   ]
 }

@@ -16,8 +16,12 @@ import {
   UseInterceptors,
   ValidationPipe,
 } from '@nestjs/common';
-import { FilesInterceptor } from '@nestjs/platform-express';
+import { FileFieldsInterceptor } from '@nestjs/platform-express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import {
+  createAggregateMemoryStorage,
+  MAX_IMAGE_UPLOAD_FILE_BYTES,
+} from '../upload/aggregate-memory-storage';
 import { AiService } from './ai.service';
 import type { AiLineId } from './ai.service';
 import { CreateImageDto } from './dto/create-image.dto';
@@ -28,7 +32,11 @@ import {
   DEFAULT_IMAGE_RESOLUTION,
 } from './image-parameters';
 import { ImagesService } from './images.service';
-import type { UploadedImageFile } from './types/uploaded-image-file';
+import { ImageGenerationThrottlerGuard } from './image-generation-throttler.guard';
+import { ImageUploadConcurrencyInterceptor } from './image-upload-concurrency.interceptor';
+import type { UploadedGenerationFiles } from './types/uploaded-image-file';
+
+const imageUploadStorage = createAggregateMemoryStorage();
 
 interface AuthenticatedRequest {
   user: { id: number };
@@ -71,15 +79,32 @@ export class ImagesController {
   }
 
   @Post('generate')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, ImageGenerationThrottlerGuard)
   @UseInterceptors(
-    FilesInterceptor('images', 5, { limits: { fileSize: 20 * 1024 * 1024 } }),
+    ImageUploadConcurrencyInterceptor,
+    FileFieldsInterceptor(
+      [
+        { name: 'images', maxCount: 5 },
+        { name: 'mask', maxCount: 1 },
+      ],
+      {
+        storage: imageUploadStorage,
+        limits: {
+          fileSize: MAX_IMAGE_UPLOAD_FILE_BYTES,
+          files: 6,
+          fields: 32,
+          parts: 38,
+        },
+      },
+    ),
   )
   generate(
     @Request() req: AuthenticatedRequest,
     @Body(ValidationPipe) dto: CreateImageDto,
-    @UploadedFiles() images?: UploadedImageFile[],
+    @UploadedFiles() files?: UploadedGenerationFiles,
   ) {
+    const images = files?.images || [];
+    const mask = files?.mask?.[0];
     const urls = [dto.sourceImageUrl, dto.referenceImageUrl].filter(
       (url): url is string => Boolean(url),
     );
@@ -101,7 +126,7 @@ export class ImagesController {
         size: dto.size,
         referenceImageUrls: urls,
       },
-      { files: images || [], urls },
+      { files: images, urls, ...(mask ? { mask } : {}) },
     );
   }
 

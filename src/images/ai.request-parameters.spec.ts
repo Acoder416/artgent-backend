@@ -1,8 +1,9 @@
 import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
+import { REAL_PNG_3X2 } from '../test/image-fixtures';
 import { AiService } from './ai.service';
 
-const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const PNG = REAL_PNG_3X2;
 
 function createService(overrides: Record<string, unknown> = {}) {
   return new AiService(
@@ -31,7 +32,7 @@ describe('AiService image generation request parameters', () => {
       'gpt-image-2',
       '2560x3200',
       undefined,
-      undefined,
+      'line-b',
       'high',
     );
 
@@ -65,9 +66,13 @@ describe('AiService image generation request parameters', () => {
       data: { data: [{ b64_json: PNG.toString('base64') }] },
     });
 
-    const result = await createService({
-      IMAGE_STREAM_ENABLED: 'false',
-    }).generateImage('A product photograph', 'gpt-image-2', '1024x1024');
+    const result = await createService().generateImage(
+      'A product photograph',
+      'gpt-image-2',
+      '1024x1024',
+      undefined,
+      'line-a',
+    );
 
     expect(result.success).toBe(true);
     const [, payload, config] = post.mock.calls[0];
@@ -77,8 +82,11 @@ describe('AiService image generation request parameters', () => {
       n: 1,
       size: '1024x1024',
       quality: 'auto',
+      response_format: 'b64_json',
+      history_disabled: true,
     });
     expect(config).toMatchObject({
+      maxContentLength: 40 * 1024 * 1024,
       headers: {
         Authorization: 'Bearer test-key',
         'Content-Type': 'application/json',
@@ -95,13 +103,47 @@ describe('AiService image generation request parameters', () => {
 
     const result = await createService({
       IMAGE_PARTIAL_IMAGES: 3,
-    }).generateImage('A product photograph', 'gpt-image-2', '1024x1024');
+    }).generateImage(
+      'A product photograph',
+      'gpt-image-2',
+      '1024x1024',
+      undefined,
+      'line-b',
+    );
 
     expect(result.success).toBe(true);
     expect(post.mock.calls[0][1]).toMatchObject({
       stream: true,
       partial_images: 0,
     });
+  });
+
+  it('keeps line-b streaming when the legacy global default is disabled', async () => {
+    const post = jest.spyOn(axios, 'post').mockResolvedValue({
+      data: { data: [{ b64_json: PNG.toString('base64') }] },
+    });
+
+    const result = await createService({
+      IMAGE_STREAM_ENABLED: false,
+    }).generateImage(
+      'A product photograph',
+      'gpt-image-2',
+      '1024x1024',
+      undefined,
+      'line-b',
+    );
+
+    expect(result.success).toBe(true);
+    expect(post.mock.calls[0][1]).toMatchObject({
+      stream: true,
+      partial_images: 0,
+    });
+    const requestConfig = post.mock.calls[0][2] as {
+      headers?: Record<string, string>;
+      responseType?: string;
+    };
+    expect(requestConfig.responseType).toBe('stream');
+    expect(requestConfig.headers?.Accept).toBe('text/event-stream');
   });
 
   it('rejects an invalid streaming flag instead of silently enabling it', () => {
