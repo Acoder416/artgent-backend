@@ -7,11 +7,17 @@ import { AiService } from './ai.service';
 import { ImageGenerationWorker } from './image-generation.worker';
 import { UsersModule } from '../users/users.module';
 import { UploadModule } from '../upload/upload.module';
+import { ImageVariantService } from './image-variant.service';
 
 @Module({
   imports: [TypeOrmModule.forFeature([Image]), UsersModule, UploadModule],
   controllers: [ImagesController],
-  providers: [ImagesService, AiService, ImageGenerationWorker],
-  exports: [ImagesService],
+  providers: [
+    ImagesService,
+    AiService,
+    ImageVariantService,
+    ImageGenerationWorker,
+  ],
+  exports: [ImagesService, ImageVariantService],
 })
 export class ImagesModule {}

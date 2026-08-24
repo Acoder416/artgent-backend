@@ -36,6 +36,10 @@ describe('MySQL entity metadata', () => {
         'leaseExpiresAt',
         'mimeType',
         'imageFormat',
+        'thumbnailUrl',
+        'thumbnailKey',
+        'previewUrl',
+        'previewKey',
         'quality',
       ].every((property) =>
         imageMetadata.columns.some(
@@ -43,5 +47,15 @@ describe('MySQL entity metadata', () => {
         ),
       ),
     ).toBe(true);
+    expect(
+      imageMetadata.indices.map((index) =>
+        index.columns.map((column) => column.propertyName),
+      ),
+    ).toEqual(
+      expect.arrayContaining([
+        ['userId', 'createdAt', 'id'],
+        ['userId', 'status', 'createdAt', 'id'],
+      ]),
+    );
   });
 });

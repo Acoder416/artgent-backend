@@ -21,17 +21,28 @@ export type ImageStatus = 'pending' | 'generating' | 'completed' | 'failed';
 export const LEGACY_IMAGE_JOB_VERSION = 0;
 export const DURABLE_IMAGE_JOB_VERSION = 1;
 
-const IMAGE_STATUS_VALUES: ImageStatus[] = [
+export const IMAGE_STATUS_VALUES: ImageStatus[] = [
   'pending',
   'generating',
   'completed',
   'failed',
 ];
 
+export function isImageStatus(value: string): value is ImageStatus {
+  return IMAGE_STATUS_VALUES.includes(value as ImageStatus);
+}
+
 @Entity('images')
 @Index('IDX_images_queue_available', ['status', 'availableAt', 'id'])
 @Index('IDX_images_queue_lease', ['status', 'leaseExpiresAt'])
 @Index('IDX_images_request_status', ['requestId', 'status'])
+@Index('IDX_images_user_created_id', ['userId', 'createdAt', 'id'])
+@Index('IDX_images_user_status_created_id', [
+  'userId',
+  'status',
+  'createdAt',
+  'id',
+])
 export class Image {
   @PrimaryGeneratedColumn()
   id: number;
@@ -72,6 +83,38 @@ export class Image {
 
   @Column({ type: 'varchar', length: 500, name: 'image_key', nullable: true })
   imageKey: string | null;
+
+  @Column({
+    type: 'varchar',
+    length: 500,
+    name: 'thumbnail_url',
+    nullable: true,
+  })
+  thumbnailUrl: string | null;
+
+  @Column({
+    type: 'varchar',
+    length: 500,
+    name: 'thumbnail_key',
+    nullable: true,
+  })
+  thumbnailKey: string | null;
+
+  @Column({
+    type: 'varchar',
+    length: 500,
+    name: 'preview_url',
+    nullable: true,
+  })
+  previewUrl: string | null;
+
+  @Column({
+    type: 'varchar',
+    length: 500,
+    name: 'preview_key',
+    nullable: true,
+  })
+  previewKey: string | null;
 
   @Column({ type: 'varchar', length: 100, name: 'mime_type', nullable: true })
   mimeType: string | null;

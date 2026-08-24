@@ -54,12 +54,15 @@ describe('MinioService image storage', () => {
       'images/7/image-42.png',
       PNG,
       PNG.length,
-      { 'Content-Type': 'image/png' },
+      {
+        'Content-Type': 'image/png',
+        'Cache-Control': 'public, max-age=31536000, immutable',
+      },
     );
   });
 
   it('creates generated keys under a requested storage folder', async () => {
-    const { service } = createHarness();
+    const { client, service } = createHarness();
 
     const stored = await service.storeImage(WEBP, 7, {
       folder: 'job-inputs',
@@ -71,6 +74,13 @@ describe('MinioService image storage', () => {
       mimeType: 'image/webp',
       imageFormat: 'webp',
     });
+    expect(client.putObject).toHaveBeenCalledWith(
+      'artgen-test',
+      stored.key,
+      WEBP,
+      WEBP.length,
+      { 'Content-Type': 'image/webp' },
+    );
   });
 
   it('keeps uploadImage compatible for existing URL callers', async () => {
@@ -181,6 +191,26 @@ describe('MinioService stored image recovery', () => {
       'artgen-test',
       'images/7/image-42.png',
     );
+  });
+
+  it('stats an owned public image URL without downloading it', async () => {
+    const { client, service } = createHarness({
+      statObject: jest.fn().mockResolvedValue({
+        size: PNG.length,
+        metaData: { 'content-type': 'image/png' },
+      }),
+    });
+
+    await expect(
+      service.statImageByUrl(
+        'https://cdn.test/artgen/images/7/image-42.png',
+      ),
+    ).resolves.toMatchObject({
+      key: 'images/7/image-42.png',
+      size: PNG.length,
+      mimeType: 'image/png',
+    });
+    expect(client.getObject).not.toHaveBeenCalled();
   });
 
   it('rejects an external URL without reading MinIO', async () => {

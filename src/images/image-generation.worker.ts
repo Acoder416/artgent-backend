@@ -3,6 +3,7 @@ import {
   Logger,
   OnApplicationBootstrap,
   OnApplicationShutdown,
+  Optional,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -21,6 +22,8 @@ import type { ImageFormat } from '../upload/image-format';
 import { MinioService, type StoredImage } from '../upload/minio.service';
 import { AiService } from './ai.service';
 import type { ImageJobInputReference } from './generation-input';
+import { imageVariantKeys } from './image-variant';
+import { ImageVariantService } from './image-variant.service';
 import {
   DURABLE_IMAGE_JOB_VERSION,
   Image,
@@ -30,6 +33,11 @@ import { DEFAULT_IMAGE_QUALITY } from './image-parameters';
 import type { ReferenceImage } from './types/uploaded-image-file';
 
 const RETRY_DELAYS_MS = [5_000, 30_000, 120_000];
+
+interface StoredImageVariants {
+  thumbnail?: StoredImage;
+  preview?: StoredImage;
+}
 
 @Injectable()
 export class ImageGenerationWorker
@@ -58,6 +66,8 @@ export class ImageGenerationWorker
     private readonly minioService: MinioService,
     private readonly usersService: UsersService,
     private readonly configService: ConfigService,
+    @Optional()
+    private readonly imageVariantService?: ImageVariantService,
   ) {
     this.concurrency = this.integerConfig(
       'IMAGE_WORKER_CONCURRENCY',
@@ -224,7 +234,11 @@ export class ImageGenerationWorker
     try {
       const storedOutput = await this.findStoredOutput(claimed);
       if (storedOutput) {
-        await this.completeJob(claimed, storedOutput);
+        const variants = await this.storeVariantsBestEffort(
+          claimed,
+          storedOutput,
+        );
+        await this.completeJob(claimed, storedOutput, variants);
         return;
       }
 
@@ -266,8 +280,16 @@ export class ImageGenerationWorker
           key: outputKey,
         },
       );
-      if (!(await this.completeJob(claimed, stored))) {
-        await this.cleanupUnreferencedOutput(claimed.id, stored.key);
+      const variants = await this.storeVariantsBestEffort(
+        claimed,
+        stored,
+        result.imageBuffer,
+      );
+      if (!(await this.completeJob(claimed, stored, variants))) {
+        await this.cleanupUnreferencedOutput(claimed.id, stored.key, [
+          variants.thumbnail?.key,
+          variants.preview?.key,
+        ]);
       }
     } catch (error: unknown) {
       await this.handleFailure(claimed, this.errorMessage(error), true);
@@ -363,12 +385,33 @@ export class ImageGenerationWorker
     const now = new Date();
     const leaseExpiresAt = new Date(now.getTime() + this.leaseDurationMs);
     const previousImageKey = image.imageKey;
+    const deterministicPreviousVariants = previousImageKey
+      ? imageVariantKeys(previousImageKey)
+      : null;
+    const previousOutputKeys = Array.from(
+      new Set(
+        [
+          previousImageKey,
+          image.thumbnailKey,
+          image.previewKey,
+          deterministicPreviousVariants?.thumbnail,
+          deterministicPreviousVariants?.preview,
+        ].filter((key): key is string => Boolean(key)),
+      ),
+    );
     const reserved = await this.imagesRepository.update(
       {
         ...this.leaseCriteria(image.id, image.leaseToken),
         leaseExpiresAt: MoreThan(now),
       },
-      { imageKey, leaseExpiresAt },
+      {
+        imageKey,
+        thumbnailUrl: null,
+        thumbnailKey: null,
+        previewUrl: null,
+        previewKey: null,
+        leaseExpiresAt,
+      },
     );
     if (reserved.affected !== 1) {
       this.logger.warn(
@@ -378,9 +421,15 @@ export class ImageGenerationWorker
     }
 
     image.imageKey = imageKey;
+    image.thumbnailUrl = null;
+    image.thumbnailKey = null;
+    image.previewUrl = null;
+    image.previewKey = null;
     image.leaseExpiresAt = leaseExpiresAt;
     if (previousImageKey && previousImageKey !== imageKey) {
-      await this.deleteOutputBestEffort(image.id, previousImageKey);
+      for (const previousOutputKey of previousOutputKeys) {
+        await this.deleteOutputBestEffort(image.id, previousOutputKey);
+      }
     }
     return true;
   }
@@ -394,17 +443,96 @@ export class ImageGenerationWorker
     return null;
   }
 
+  private async storeVariantsBestEffort(
+    image: Image,
+    original: StoredImage,
+    sourceBuffer?: Buffer,
+  ): Promise<StoredImageVariants> {
+    const variants: StoredImageVariants = {};
+    if (!this.imageVariantService) return variants;
+
+    const keys = imageVariantKeys(original.key);
+    try {
+      const [thumbnail, preview] = await Promise.all([
+        this.minioService.statImage(keys.thumbnail),
+        this.minioService.statImage(keys.preview),
+      ]);
+      if (thumbnail) variants.thumbnail = thumbnail;
+      if (preview) variants.preview = preview;
+      if (thumbnail && preview) return variants;
+
+      const source =
+        sourceBuffer || (await this.minioService.readImage(original.key));
+      const generated = await this.imageVariantService.generate(source);
+      const pending: Array<{
+        kind: keyof StoredImageVariants;
+        key: string;
+        buffer: Buffer;
+      }> = [];
+      if (!thumbnail) {
+        pending.push({
+          kind: 'thumbnail',
+          key: keys.thumbnail,
+          buffer: generated.thumbnail,
+        });
+      }
+      if (!preview) {
+        pending.push({
+          kind: 'preview',
+          key: keys.preview,
+          buffer: generated.preview,
+        });
+      }
+
+      const uploads = await Promise.allSettled(
+        pending.map((variant) =>
+          this.minioService.storeImage(variant.buffer, image.userId, {
+            key: variant.key,
+          }),
+        ),
+      );
+      uploads.forEach((upload, index) => {
+        const variant = pending[index];
+        if (upload.status === 'fulfilled') {
+          if (variant.kind === 'thumbnail') variants.thumbnail = upload.value;
+          if (variant.kind === 'preview') variants.preview = upload.value;
+          return;
+        }
+        this.logger.warn(
+          `Unable to store ${variant.kind} for image ${image.id}: ${this.errorMessage(upload.reason)}`,
+        );
+      });
+    } catch (error: unknown) {
+      this.logger.warn(
+        `Unable to create image variants for image ${image.id}: ${this.errorMessage(error)}`,
+      );
+    }
+
+    return variants;
+  }
+
   private async cleanupUnreferencedOutput(
     imageId: number,
     imageKey: string,
+    relatedKeys: Array<string | undefined> = [],
   ): Promise<void> {
     try {
       const current = await this.imagesRepository.findOne({
-        select: { imageKey: true, status: true },
+        select: {
+          imageKey: true,
+          thumbnailKey: true,
+          previewKey: true,
+          status: true,
+        },
         where: { id: imageId },
       });
       if (current?.imageKey === imageKey && current.status !== 'failed') return;
-      await this.deleteOutputBestEffort(imageId, imageKey);
+      const outputKeys = [imageKey, ...relatedKeys].filter(
+        (key): key is string => Boolean(key),
+      );
+      for (const outputKey of outputKeys) {
+        await this.deleteOutputBestEffort(imageId, outputKey);
+      }
     } catch (error: unknown) {
       this.logger.warn(
         `Unable to inspect stale output for image ${imageId}: ${this.errorMessage(error)}`,
@@ -469,6 +597,7 @@ export class ImageGenerationWorker
   private async completeJob(
     image: Image,
     stored: StoredImage,
+    variants: StoredImageVariants = {},
   ): Promise<boolean> {
     const result = await this.imagesRepository.update(
       this.leaseCriteria(image.id, image.leaseToken),
@@ -476,6 +605,10 @@ export class ImageGenerationWorker
         status: 'completed',
         imageUrl: stored.url,
         imageKey: stored.key,
+        thumbnailUrl: variants.thumbnail?.url || null,
+        thumbnailKey: variants.thumbnail?.key || null,
+        previewUrl: variants.preview?.url || null,
+        previewKey: variants.preview?.key || null,
         mimeType: stored.mimeType,
         imageFormat: stored.imageFormat,
         errorMessage: null,
