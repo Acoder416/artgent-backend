@@ -57,6 +57,37 @@ $ npm run test:e2e
 $ npm run test:cov
 ```
 
+## Image variants
+
+Generated artwork keeps its original file for downloads and editing. The
+gallery and detail views use pre-generated WebP thumbnail and preview files.
+
+Preview the historical backfill without writing anything:
+
+```bash
+npm run backfill:image-variants -- --env=production
+```
+
+After backing up the database and deploying the nullable variant columns, run
+the idempotent backfill in small batches:
+
+```bash
+npm run backfill:image-variants -- --env=production --apply --batch-size=10 --concurrency=2
+```
+
+The configured MinIO credentials must allow `stat`, `get`, `put`, and `delete`
+for `images/**`. Resolve any apply credential error before retrying; failed
+rows are left unchanged.
+
+Resume after a known image id with `--after-id=123`. Failed rows are reported
+without exposing credentials and can be retried by running the same command.
+
+Verify the immutable object metadata and a second-request Cloudflare hit:
+
+```bash
+npm run check:image-cache -- https://static.example.com/artgen/images/example.thumb.webp
+```
+
 ## Deployment
 
 When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.

@@ -5,6 +5,8 @@ import { MinioService } from '../upload/minio.service';
 import { REAL_PNG_3X2 } from '../test/image-fixtures';
 import { AiService } from './ai.service';
 import { ImageGenerationWorker } from './image-generation.worker';
+import { imageVariantKeys } from './image-variant';
+import { ImageVariantService } from './image-variant.service';
 import { Image } from './image.entity';
 
 async function waitUntil(
@@ -262,6 +264,132 @@ describe('ImageGenerationWorker concurrency', () => {
     expect(rows.every((row) => row.status === 'completed')).toBe(true);
     await worker.onApplicationShutdown();
   });
+
+  it('stores thumbnail and preview variants beside a generated original', async () => {
+    const row = pendingImage(8);
+    const repository = statefulRepository(row);
+    const storeImage = jest.fn(
+      (_buffer: Buffer, _userId: number, options: { key: string }) =>
+        Promise.resolve({
+          key: options.key,
+          url: `https://static.example.com/artgen/${options.key}`,
+          imageFormat: options.key.endsWith('.webp') ? 'webp' : 'png',
+          mimeType: options.key.endsWith('.webp') ? 'image/webp' : 'image/png',
+        }),
+    );
+    const variantService = new ImageVariantService(
+      jest.fn().mockResolvedValue({
+        thumbnail: Buffer.from('thumbnail'),
+        preview: Buffer.from('preview'),
+      }),
+    );
+    const worker = new ImageGenerationWorker(
+      repository,
+      {
+        generateImage: jest.fn().mockResolvedValue(successfulImageResult()),
+      } as unknown as AiService,
+      {
+        statImage: jest.fn().mockResolvedValue(null),
+        storeImage,
+      } as unknown as MinioService,
+      { refundCreditsOnce: jest.fn() } as unknown as UsersService,
+      new ConfigService(),
+      undefined,
+      variantService,
+    );
+
+    await internals(worker).processJob(row.id);
+
+    const expectedKeys = imageVariantKeys(row.imageKey || '');
+    expect(row).toMatchObject({
+      status: 'completed',
+      thumbnailKey: expectedKeys.thumbnail,
+      thumbnailUrl:
+        'https://static.example.com/artgen/' + expectedKeys.thumbnail,
+      previewKey: expectedKeys.preview,
+      previewUrl: 'https://static.example.com/artgen/' + expectedKeys.preview,
+    });
+    expect(storeImage).toHaveBeenCalledTimes(3);
+  });
+
+  it('completes the original when variant generation fails', async () => {
+    const row = pendingImage(10);
+    const repository = statefulRepository(row);
+    const storeImage = jest.fn(
+      (_buffer: Buffer, _userId: number, options: { key: string }) =>
+        Promise.resolve(storedImage(options.key)),
+    );
+    const worker = new ImageGenerationWorker(
+      repository,
+      {
+        generateImage: jest.fn().mockResolvedValue(successfulImageResult()),
+      } as unknown as AiService,
+      {
+        statImage: jest.fn().mockResolvedValue(null),
+        storeImage,
+      } as unknown as MinioService,
+      { refundCreditsOnce: jest.fn() } as unknown as UsersService,
+      new ConfigService(),
+      undefined,
+      new ImageVariantService(
+        jest.fn().mockRejectedValue(new Error('invalid image data')),
+      ),
+    );
+
+    await internals(worker).processJob(row.id);
+
+    expect(row).toMatchObject({
+      status: 'completed',
+      thumbnailUrl: null,
+      thumbnailKey: null,
+      previewUrl: null,
+      previewKey: null,
+    });
+    expect(storeImage).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps a successful preview when the thumbnail upload fails', async () => {
+    const row = pendingImage(11);
+    const repository = statefulRepository(row);
+    const storeImage = jest.fn(
+      (_buffer: Buffer, _userId: number, options: { key: string }) => {
+        if (options.key.endsWith('.thumb.webp')) {
+          return Promise.reject(new Error('thumbnail upload failed'));
+        }
+        return Promise.resolve({
+          ...storedImage(options.key),
+          imageFormat: options.key.endsWith('.webp') ? 'webp' : 'png',
+          mimeType: options.key.endsWith('.webp') ? 'image/webp' : 'image/png',
+        });
+      },
+    );
+    const worker = new ImageGenerationWorker(
+      repository,
+      {
+        generateImage: jest.fn().mockResolvedValue(successfulImageResult()),
+      } as unknown as AiService,
+      {
+        statImage: jest.fn().mockResolvedValue(null),
+        storeImage,
+      } as unknown as MinioService,
+      { refundCreditsOnce: jest.fn() } as unknown as UsersService,
+      new ConfigService(),
+      undefined,
+      new ImageVariantService(
+        jest.fn().mockResolvedValue({
+          thumbnail: Buffer.from('thumbnail'),
+          preview: Buffer.from('preview'),
+        }),
+      ),
+    );
+
+    await internals(worker).processJob(row.id);
+
+    expect(row.status).toBe('completed');
+    expect(row.thumbnailKey).toBeNull();
+    expect(row.previewKey).toMatch(/\.preview\.webp$/);
+  });
+
   it('reclaims an expired job and restores uploaded reference files', async () => {
     const row = pendingImage(9);
     row.quality = 'high';
@@ -565,6 +693,7 @@ describe('ImageGenerationWorker concurrency', () => {
       count: jest.fn().mockResolvedValue(0),
     } as unknown as Repository<Image>;
     const generateImage = jest.fn();
+    const expectedKeys = imageVariantKeys(persistedKey);
     const statImage = jest.fn((key: string) =>
       Promise.resolve(
         key === persistedKey
@@ -583,11 +712,25 @@ describe('ImageGenerationWorker concurrency', () => {
       {
         statImage,
         readImage: jest.fn().mockResolvedValue(REAL_PNG_3X2),
-        storeImage: jest.fn(),
+        storeImage: jest.fn(
+          (_buffer: Buffer, _userId: number, options: { key: string }) =>
+            Promise.resolve({
+              ...storedImage(options.key),
+              imageFormat: 'webp',
+              mimeType: 'image/webp',
+            }),
+        ),
         deleteImage: jest.fn(),
       } as unknown as MinioService,
       { refundCreditsOnce: jest.fn() } as unknown as UsersService,
       new ConfigService({ IMAGE_QUEUE_POLL_INTERVAL_MS: 60000 }),
+      undefined,
+      new ImageVariantService(
+        jest.fn().mockResolvedValue({
+          thumbnail: Buffer.from('thumbnail'),
+          preview: Buffer.from('preview'),
+        }),
+      ),
     );
 
     await worker.onApplicationBootstrap();
@@ -600,6 +743,8 @@ describe('ImageGenerationWorker concurrency', () => {
     expect(row.imageKey).toBe(persistedKey);
     expect(row.width).toBe(3);
     expect(row.height).toBe(2);
+    expect(row.thumbnailKey).toBe(expectedKeys.thumbnail);
+    expect(row.previewKey).toBe(expectedKeys.preview);
   });
 
   it('cleans staged input objects after the last job completes', async () => {
@@ -1240,6 +1385,7 @@ describe('ImageGenerationWorker concurrency', () => {
   it('deletes a missing persisted output when a new lease supersedes its key', async () => {
     const row = pendingImage(23);
     const previousKey = 'images/7/23-previous-lease.png';
+    const previousVariants = imageVariantKeys(previousKey);
     row.imageKey = previousKey;
     const repository = statefulRepository(row);
     const deleteImage = jest.fn().mockResolvedValue(undefined);
@@ -1264,7 +1410,10 @@ describe('ImageGenerationWorker concurrency', () => {
 
     expect(row.status).toBe('completed');
     expect(row.imageKey).not.toBe(previousKey);
-    expect(deleteImage).toHaveBeenCalledWith(previousKey);
+    expect(deleteImage).toHaveBeenNthCalledWith(1, previousKey);
+    expect(deleteImage).toHaveBeenNthCalledWith(2, previousVariants.thumbnail);
+    expect(deleteImage).toHaveBeenNthCalledWith(3, previousVariants.preview);
+    expect(deleteImage).toHaveBeenCalledTimes(3);
   });
 
   it('retries persisted staged-input cleanup after a transient failure', async () => {

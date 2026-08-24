@@ -19,7 +19,9 @@
     "test:debug": "node --inspect-brk -r tsconfig-paths/register -r ts-node/register node_modules/.bin/jest --runInBand",
     "test:e2e": "jest --config ./test/jest-e2e.json",
     "dev": "node scripts/dev.mjs",
-    "prod": "node scripts/prod.mjs"
+    "prod": "node scripts/prod.mjs",
+    "backfill:image-variants": "npm run build --silent && node dist/images/image-variant-backfill.cli.js",
+    "check:image-cache": "node scripts/image-cache-check.mjs"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.1",

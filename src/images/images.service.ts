@@ -7,7 +7,16 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, In, Repository } from 'typeorm';
+import {
+  And,
+  DataSource,
+  FindOptionsWhere,
+  In,
+  LessThan,
+  MoreThanOrEqual,
+  Raw,
+  Repository,
+} from 'typeorm';
 import { UsersService } from '../users/users.service';
 import {
   MAX_STORED_IMAGE_READ_BYTES,
@@ -19,7 +28,11 @@ import { AiService } from './ai.service';
 import type { AiLineId } from './ai.service';
 import type { ImageJobInputReference } from './generation-input';
 import { ImageGenerationWorker } from './image-generation.worker';
-import { DURABLE_IMAGE_JOB_VERSION, Image } from './image.entity';
+import {
+  DURABLE_IMAGE_JOB_VERSION,
+  Image,
+  isImageStatus,
+} from './image.entity';
 import {
   DEFAULT_IMAGE_ASPECT_RATIO,
   DEFAULT_IMAGE_QUALITY,
@@ -44,6 +57,23 @@ export interface GenerateBatchInput {
   size?: string;
   referenceImageUrls?: string[];
 }
+
+export interface FindImagesQuery {
+  page?: string | number;
+  limit?: string | number;
+  cursor?: string;
+  q?: string;
+  template?: string;
+  createdAfter?: string;
+  status?: string;
+}
+
+interface ImageCursor {
+  createdAt: string;
+  id: number;
+}
+
+const MYSQL_CURSOR_TIMESTAMP = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{6}$/;
 
 @Injectable()
 export class ImagesService {
@@ -183,6 +213,24 @@ export class ImagesService {
     return this.imagesRepository.findOne({ where: { id } });
   }
 
+  async findDetailByUserId(
+    id: number,
+    userId: number,
+  ): Promise<{ image: Image; results: Image[] }> {
+    const image = await this.imagesRepository.findOne({
+      where: { id, userId },
+    });
+    if (!image) throw new NotFoundException('图片不存在');
+    if (!image.requestId) return { image, results: [image] };
+
+    const results = await this.imagesRepository.find({
+      where: { userId, requestId: image.requestId },
+      order: { createdAt: 'ASC', id: 'ASC' },
+      take: 5,
+    });
+    return { image, results };
+  }
+
   async getDownload(id: number, userId: number) {
     const image = await this.imagesRepository.findOne({ where: { id } });
     if (
@@ -240,16 +288,159 @@ export class ImagesService {
     });
   }
 
-  async findByUserId(userId: number, page = 1, limit = 60) {
-    const safeLimit = Math.min(Math.max(Number(limit) || 60, 1), 100);
-    const safePage = Math.max(Number(page) || 1, 1);
-    const [images, total] = await this.imagesRepository.findAndCount({
-      where: { userId },
-      order: { createdAt: 'DESC' },
-      skip: (safePage - 1) * safeLimit,
-      take: safeLimit,
-    });
-    return { images, total };
+  async findByUserId(userId: number, query: FindImagesQuery = {}) {
+    if (query.page !== undefined && query.cursor !== undefined) {
+      throw new BadRequestException('page and cursor cannot be combined');
+    }
+
+    const limit = Math.min(
+      Math.max(Math.floor(Number(query.limit)) || 24, 1),
+      100,
+    );
+    const cursor = query.cursor
+      ? this.decodeImageCursor(query.cursor)
+      : undefined;
+    const createdAfter = query.createdAfter
+      ? this.parseCreatedAfter(query.createdAfter)
+      : undefined;
+    const baseWhere: FindOptionsWhere<Image> = { userId };
+    const search = query.q?.trim();
+    const template = query.template?.trim();
+    const status = query.status?.trim();
+    if (search) {
+      const escapedSearch = search
+        .toLowerCase()
+        .replaceAll('=', '==')
+        .replaceAll('%', '=%')
+        .replaceAll('_', '=_');
+      baseWhere.prompt = Raw(
+        (alias) => `LOWER(${alias}) LIKE :imageSearch ESCAPE '='`,
+        { imageSearch: `%${escapedSearch}%` },
+      );
+    }
+    if (template) baseWhere.template = template;
+    if (status) {
+      if (!isImageStatus(status)) {
+        throw new BadRequestException('Invalid image status');
+      }
+      baseWhere.status = status;
+    }
+    if (createdAfter) baseWhere.createdAt = MoreThanOrEqual(createdAfter);
+    let where: FindOptionsWhere<Image> | FindOptionsWhere<Image>[] = baseWhere;
+    if (cursor) {
+      where = [
+        {
+          ...baseWhere,
+          createdAt: createdAfter
+            ? And(
+                MoreThanOrEqual(createdAfter),
+                Raw((alias) => `${alias} < :imageCursorCreatedAt`, {
+                  imageCursorCreatedAt: cursor.createdAt,
+                }),
+              )
+            : Raw((alias) => `${alias} < :imageCursorCreatedAt`, {
+                imageCursorCreatedAt: cursor.createdAt,
+              }),
+        },
+        {
+          ...baseWhere,
+          createdAt: createdAfter
+            ? And(
+                MoreThanOrEqual(createdAfter),
+                Raw((alias) => `${alias} = :imageCursorCreatedAt`, {
+                  imageCursorCreatedAt: cursor.createdAt,
+                }),
+              )
+            : Raw((alias) => `${alias} = :imageCursorCreatedAt`, {
+                imageCursorCreatedAt: cursor.createdAt,
+              }),
+          id: LessThan(cursor.id),
+        },
+      ];
+    }
+    const page = Math.max(Math.floor(Number(query.page)) || 1, 1);
+
+    const [rows, total, failedTotal] = await Promise.all([
+      this.imagesRepository.find({
+        where,
+        order: { createdAt: 'DESC', id: 'DESC' },
+        skip: query.page === undefined ? 0 : (page - 1) * limit,
+        take: limit + 1,
+      }),
+      this.imagesRepository.count({ where: baseWhere }),
+      this.imagesRepository.count({ where: { userId, status: 'failed' } }),
+    ]);
+    const hasMore = rows.length > limit;
+    const images = hasMore ? rows.slice(0, limit) : rows;
+    const lastImage = images.at(-1);
+    const nextCursor =
+      hasMore && lastImage
+        ? this.encodeImageCursor(
+            await this.findCursorTimestamp(lastImage.id, userId),
+            lastImage.id,
+          )
+        : null;
+
+    return {
+      images,
+      total,
+      failedTotal,
+      nextCursor,
+    };
+  }
+
+  private async findCursorTimestamp(
+    id: number,
+    userId: number,
+  ): Promise<string> {
+    const rows = (await this.imagesRepository.query(
+      `SELECT DATE_FORMAT(created_at, '%Y-%m-%d %H:%i:%s.%f') AS created_at_cursor
+       FROM images WHERE id = ? AND user_id = ? LIMIT 1`,
+      [id, userId],
+    )) as Array<{ created_at_cursor?: unknown }>;
+    const value = String(rows[0]?.created_at_cursor || '');
+    if (!MYSQL_CURSOR_TIMESTAMP.test(value)) {
+      throw new Error('Unable to read image cursor timestamp');
+    }
+    return value;
+  }
+
+  private encodeImageCursor(createdAt: string, id: number): string {
+    return Buffer.from(JSON.stringify([createdAt, id])).toString('base64url');
+  }
+
+  private decodeImageCursor(value: string): ImageCursor {
+    try {
+      if (!/^[A-Za-z0-9_-]+$/.test(value)) throw new Error('Invalid base64url');
+      const payload: unknown = JSON.parse(
+        Buffer.from(value, 'base64url').toString('utf8'),
+      );
+      if (!Array.isArray(payload) || payload.length !== 2) {
+        throw new Error('Invalid payload');
+      }
+      const createdAtValue: unknown = payload[0];
+      const idValue: unknown = payload[1];
+      const createdAt = String(createdAtValue);
+      const id = Number(idValue);
+      if (
+        !MYSQL_CURSOR_TIMESTAMP.test(createdAt) ||
+        !Number.isSafeInteger(id) ||
+        id <= 0
+      ) {
+        throw new Error('Invalid cursor values');
+      }
+      return { createdAt, id };
+    } catch {
+      throw new BadRequestException('Invalid image cursor');
+    }
+  }
+
+  private parseCreatedAfter(value: string): Date {
+    const createdAfter = new Date(value);
+    if (Number.isNaN(createdAfter.getTime())) {
+      throw new BadRequestException('Invalid createdAfter');
+    }
+    return createdAfter;
   }
 
   async deleteFailedImages(
@@ -294,11 +485,31 @@ export class ImagesService {
   }
 
   private async deleteStoredOutput(image: Image): Promise<void> {
+    const deletions: Promise<void>[] = [];
     if (image.imageKey) {
-      await this.minioService.deleteImage(image.imageKey);
+      deletions.push(this.minioService.deleteImage(image.imageKey));
     } else if (image.imageUrl) {
-      await this.minioService.deleteImageByUrlStrict(image.imageUrl);
+      deletions.push(this.minioService.deleteImageByUrlStrict(image.imageUrl));
     }
+    if (image.thumbnailKey) {
+      deletions.push(this.minioService.deleteImage(image.thumbnailKey));
+    } else if (image.thumbnailUrl) {
+      deletions.push(
+        this.minioService.deleteImageByUrlStrict(image.thumbnailUrl),
+      );
+    }
+    if (image.previewKey) {
+      deletions.push(this.minioService.deleteImage(image.previewKey));
+    } else if (image.previewUrl) {
+      deletions.push(
+        this.minioService.deleteImageByUrlStrict(image.previewUrl),
+      );
+    }
+    const results = await Promise.allSettled(deletions);
+    const failure = results.find(
+      (result): result is PromiseRejectedResult => result.status === 'rejected',
+    );
+    if (failure) throw failure.reason;
   }
 
   private async stageInputReferences(

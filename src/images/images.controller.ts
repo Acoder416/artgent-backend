@@ -32,6 +32,7 @@ import {
   DEFAULT_IMAGE_RESOLUTION,
 } from './image-parameters';
 import { ImagesService } from './images.service';
+import type { FindImagesQuery } from './images.service';
 import { ImageGenerationThrottlerGuard } from './image-generation-throttler.guard';
 import { ImageUploadConcurrencyInterceptor } from './image-upload-concurrency.interceptor';
 import type { UploadedGenerationFiles } from './types/uploaded-image-file';
@@ -134,10 +135,9 @@ export class ImagesController {
   @UseGuards(JwtAuthGuard)
   findAll(
     @Request() req: AuthenticatedRequest,
-    @Query('page') page = 1,
-    @Query('limit') limit = 60,
+    @Query() query: FindImagesQuery,
   ) {
-    return this.imagesService.findByUserId(req.user.id, page, limit);
+    return this.imagesService.findByUserId(req.user.id, query);
   }
 
   @Get('statuses')
@@ -169,6 +169,15 @@ export class ImagesController {
       length: file.size,
       disposition: `attachment; filename="${file.filename}"`,
     });
+  }
+
+  @Get(':id/detail')
+  @UseGuards(JwtAuthGuard)
+  findDetail(
+    @Request() req: AuthenticatedRequest,
+    @Param('id', ParseIntPipe) id: number,
+  ) {
+    return this.imagesService.findDetailByUserId(id, req.user.id);
   }
 
   @Get(':id')

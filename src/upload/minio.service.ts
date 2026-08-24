@@ -89,7 +89,12 @@ export class MinioService implements OnModuleInit {
       key,
       imageBuffer,
       imageBuffer.length,
-      { 'Content-Type': metadata.mimeType },
+      {
+        'Content-Type': metadata.mimeType,
+        ...(key.startsWith('images/')
+          ? { 'Cache-Control': 'public, max-age=31536000, immutable' }
+          : {}),
+      },
     );
 
     this.logger.log(`Image uploaded: ${key}`);
@@ -157,6 +162,12 @@ export class MinioService implements OnModuleInit {
       if (this.isMissingObject(error)) return null;
       throw error;
     }
+  }
+
+  async statImageByUrl(imageUrl: string): Promise<StoredImageObject | null> {
+    const key = this.getImageKey(imageUrl);
+    if (!key) throw new Error('Unsupported image URL');
+    return this.statImage(key);
   }
 
   async openImageByKey(key: string): Promise<OpenedStoredImage> {

@@ -15,12 +15,23 @@ function createImageRepository(initialRows: Image[]): Repository<Image> {
   const rows = [...initialRows];
 
   return {
-    find: ({ where }: { where: Partial<Image> }) =>
+    find: ({ where, take }: { where: Partial<Image>; take?: number }) => {
+      const matches = rows.filter(
+        (image) =>
+          image.userId === where.userId &&
+          (where.status === undefined || image.status === where.status),
+      );
+      return Promise.resolve(
+        take === undefined ? matches : matches.slice(0, take),
+      );
+    },
+    count: ({ where }: { where: Partial<Image> }) =>
       Promise.resolve(
         rows.filter(
           (image) =>
-            image.userId === where.userId && image.status === where.status,
-        ),
+            image.userId === where.userId &&
+            (where.status === undefined || image.status === where.status),
+        ).length,
       ),
     delete: (criteria: Partial<Image> | number[]) => {
       const before = rows.length;
@@ -30,10 +41,6 @@ function createImageRepository(initialRows: Image[]): Repository<Image> {
         }
       }
       return Promise.resolve({ raw: [], affected: before - rows.length });
-    },
-    findAndCount: ({ where }: { where: Partial<Image> }) => {
-      const matches = rows.filter((image) => image.userId === where.userId);
-      return Promise.resolve([matches, matches.length]);
     },
   } as unknown as Repository<Image>;
 }

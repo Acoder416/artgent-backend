@@ -87,3 +87,49 @@ describe('ImagesController generation parameters', () => {
     expect(generateBatch).not.toHaveBeenCalled();
   });
 });
+
+describe('ImagesController library queries', () => {
+  const findByUserId = jest.fn();
+  const findDetailByUserId = jest.fn();
+  const controller = new ImagesController(
+    { findByUserId, findDetailByUserId } as unknown as ImagesService,
+    {} as AiService,
+  );
+
+  beforeEach(() => {
+    findByUserId.mockReset();
+    findDetailByUserId.mockReset();
+  });
+
+  it('forwards all list parameters as one user-scoped query', async () => {
+    const response = {
+      images: [],
+      total: 0,
+      failedTotal: 0,
+      nextCursor: null,
+    };
+    findByUserId.mockResolvedValue(response);
+    const query = {
+      cursor: 'cursor-1',
+      limit: '24',
+      q: 'landscape',
+      template: 'poster',
+      createdAfter: '2026-08-01T00:00:00.000Z',
+    };
+
+    await expect(controller.findAll({ user: { id: 7 } }, query)).resolves.toBe(
+      response,
+    );
+    expect(findByUserId).toHaveBeenCalledWith(7, query);
+  });
+
+  it('loads batch detail through the authenticated user scope', async () => {
+    const response = { image: { id: 42 }, results: [{ id: 42 }] };
+    findDetailByUserId.mockResolvedValue(response);
+
+    await expect(controller.findDetail({ user: { id: 7 } }, 42)).resolves.toBe(
+      response,
+    );
+    expect(findDetailByUserId).toHaveBeenCalledWith(42, 7);
+  });
+});
