@@ -53,9 +53,9 @@ async function bootstrap() {
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
   app.setGlobalPrefix('api');
 
-  await app.listen(port);
+  await app.listen(port, '127.0.0.1');
   console.log(
-    `Application is running in ${environment} mode on: http://localhost:${port}`,
+    `Application is running in ${environment} mode on: http://127.0.0.1:${port}`,
   );
 }
 

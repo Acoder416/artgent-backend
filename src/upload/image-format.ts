@@ -114,6 +114,7 @@ function parsePngDimensions(buffer: Buffer): ImageDimensions | null {
 
 function parseJpegDimensions(buffer: Buffer): ImageDimensions | null {
   if (buffer.length < 4 || buffer[0] !== 0xff || buffer[1] !== 0xd8) {
+    console.log('[parseJpegDimensions] Not a JPEG (invalid header)');
     return null;
   }
 
@@ -122,7 +123,10 @@ function parseJpegDimensions(buffer: Buffer): ImageDimensions | null {
   let sawScan = false;
 
   while (offset < buffer.length) {
-    if (buffer[offset] !== 0xff) return null;
+    if (buffer[offset] !== 0xff) {
+      console.log('[parseJpegDimensions] Expected FF marker at offset', offset, 'got', buffer[offset].toString(16));
+      return null;
+    }
     while (offset < buffer.length && buffer[offset] === 0xff) offset += 1;
     if (offset >= buffer.length) return null;
 
@@ -130,7 +134,9 @@ function parseJpegDimensions(buffer: Buffer): ImageDimensions | null {
     offset += 1;
     if (marker === 0x00) return null;
     if (marker === 0xd9) {
-      return sawScan && offset === buffer.length ? dimensions : null;
+      const result = sawScan && offset === buffer.length ? dimensions : null;
+      console.log('[parseJpegDimensions] Found EOI marker, sawScan:', sawScan, 'offset:', offset, 'bufferLength:', buffer.length, 'dimensions:', dimensions, 'result:', result);
+      return result;
     }
 
     // TEM, restart, and repeated SOI markers do not carry a length field.
@@ -155,6 +161,7 @@ function parseJpegDimensions(buffer: Buffer): ImageDimensions | null {
         buffer.readUInt16BE(dataOffset + 3),
         buffer.readUInt16BE(dataOffset + 1),
       );
+      console.log('[parseJpegDimensions] Found SOF marker, dimensions:', dimensions);
       if (!dimensions) return null;
     }
 
@@ -272,19 +279,32 @@ function parseWebpDimensions(buffer: Buffer): ImageDimensions | null {
 }
 
 function inspectImageStructure(buffer: Buffer): StructuredImage | null {
-  if (!Buffer.isBuffer(buffer) || buffer.length === 0) return null;
+  if (!Buffer.isBuffer(buffer) || buffer.length === 0) {
+    console.log('[inspectImageStructure] Invalid buffer');
+    return null;
+  }
+  
+  // 打印文件头（前16字节）
+  const header = buffer.slice(0, Math.min(16, buffer.length));
+  console.log('[inspectImageStructure] File header (hex):', header.toString('hex'));
+  console.log('[inspectImageStructure] File header (bytes):', Array.from(header));
+  
   const png = parsePngDimensions(buffer);
   if (png) {
+    console.log('[inspectImageStructure] Detected as PNG');
     return { mimeType: 'image/png', imageFormat: 'png', ...png };
   }
   const jpeg = parseJpegDimensions(buffer);
   if (jpeg) {
+    console.log('[inspectImageStructure] Detected as JPEG');
     return { mimeType: 'image/jpeg', imageFormat: 'jpeg', ...jpeg };
   }
   const webp = parseWebpDimensions(buffer);
   if (webp) {
+    console.log('[inspectImageStructure] Detected as WebP');
     return { mimeType: 'image/webp', imageFormat: 'webp', ...webp };
   }
+  console.log('[inspectImageStructure] Format not recognized');
   return null;
 }
 
@@ -304,8 +324,7 @@ export async function inspectDecodedImage(
   buffer: Buffer,
 ): Promise<DecodedImage | null> {
   const image = inspectImageStructure(buffer);
-  if (!image) return null;
-
+  
   try {
     const options = {
       failOn: 'error' as const,
@@ -313,20 +332,59 @@ export async function inspectDecodedImage(
       sequentialRead: true,
     };
     const decodedMetadata = await sharp(buffer, options).metadata();
-    if (
-      decodedMetadata.format !== image.imageFormat ||
-      decodedMetadata.width !== image.width ||
-      decodedMetadata.height !== image.height
-    ) {
-      return null;
+    console.log('[inspectDecodedImage] Sharp metadata:', { 
+      format: decodedMetadata.format, 
+      width: decodedMetadata.width, 
+      height: decodedMetadata.height 
+    });
+    
+    // 如果手动解析失败，但 sharp 能识别为有效的 PNG/JPEG/WebP，则使用 sharp 的结果
+    let finalImage: StructuredImage;
+    if (!image) {
+      console.log('[inspectDecodedImage] Manual parse failed, falling back to sharp validation');
+      if (!decodedMetadata.format || !decodedMetadata.width || !decodedMetadata.height) {
+        console.log('[inspectDecodedImage] Sharp also failed to decode image');
+        return null;
+      }
+      const formatMap: Record<string, { mime: ImageMimeType; format: ImageFormat }> = {
+        'jpeg': { mime: 'image/jpeg', format: 'jpeg' },
+        'png': { mime: 'image/png', format: 'png' },
+        'webp': { mime: 'image/webp', format: 'webp' },
+      };
+      const mapped = formatMap[decodedMetadata.format];
+      if (!mapped) {
+        console.log('[inspectDecodedImage] Unsupported format from sharp:', decodedMetadata.format);
+        return null;
+      }
+      // 使用 sharp 的结果作为降级方案
+      console.log('[inspectDecodedImage] Using sharp fallback for format:', decodedMetadata.format);
+      finalImage = {
+        mimeType: mapped.mime,
+        imageFormat: mapped.format,
+        width: decodedMetadata.width,
+        height: decodedMetadata.height,
+      };
+    } else {
+      console.log('[inspectDecodedImage] Manual parse succeeded:', image);
+      // 验证手动解析的结果与 sharp 一致
+      if (
+        decodedMetadata.format !== image.imageFormat ||
+        decodedMetadata.width !== image.width ||
+        decodedMetadata.height !== image.height
+      ) {
+        console.log('[inspectDecodedImage] Metadata mismatch between manual parse and sharp!');
+        return null;
+      }
+      finalImage = image;
     }
     // Force libvips to decode image pixels while keeping output memory bounded.
     await sharp(buffer, options).resize(1, 1, { fit: 'fill' }).raw().toBuffer();
     return {
-      ...image,
+      ...finalImage,
       sha256: createHash('sha256').update(buffer).digest('hex'),
     };
-  } catch {
+  } catch (error) {
+    console.log('[inspectDecodedImage] Error during validation:', error?.message || error);
     return null;
   }
 }
